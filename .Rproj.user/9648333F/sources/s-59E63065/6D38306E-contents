@@ -1,0 +1,1603 @@
+---
+title: "Feeding behavior determined through fluorescence"
+output: 
+  html_document:
+    toc: true
+    toc_float: true
+    theme: flatly
+    toc_depth: 4
+---
+### All Replicates
+Fluorescence dynamics can give us clues to larval stage dynamics.  
+When we analyze all replicates together, we get an idea of where the sampled population of animals slow feeding (lethargus).
+
+```{r, echo =  FALSE, message = FALSE, fig.width = 8, fig.height = 14}
+library(tidyverse)
+library(here)
+library(lme4)
+library(plotrix)
+library(ggsci)
+library(cowplot)
+library(SplinesUtils)
+library(ggpubr)
+library(gganimate)
+library(gifski)
+library(moments)
+
+#raw data
+plate <- readr::read_csv(here::here("processed", "20191119_GA1", "plate.csv"))
+#raw data cleaned
+clean_plate <- readr::read_csv(here::here("processed", "20191119_GA1", "raw_cleaned.csv"))
+
+red <- clean_plate %>%
+  dplyr::group_by(replicate, timepoint, row, col) %>%
+  dplyr::summarize(median.red = median(red), .groups = "drop") %>%
+  ggplot(.) +
+  aes(x = as.numeric(timepoint), y = median.red) + 
+  geom_boxplot(aes(group = timepoint), outlier.alpha = 0) +
+  geom_jitter(size=0.2, width=0.2, alpha=0.4) +
+  geom_smooth(span = 0.1, se = F, size = 0.5, method = "loess") +
+  scale_x_continuous(breaks = seq(0, 70, 5)) +
+  theme_cowplot(font_size = 12, rel_small = 10/12) +
+  labs(x="Time (h)", y = "Median red fluorescence")
+
+red_tof <- clean_plate %>%
+  dplyr::group_by(replicate, timepoint, row, col) %>%
+  dplyr::summarize(median.red = median(red/TOF), .groups = "drop") %>%
+  ggplot(.) +
+  aes(x = as.numeric(timepoint), y = median.red) + 
+  geom_boxplot(aes(group = timepoint), outlier.alpha = 0) +
+  geom_jitter(size=0.2, width=0.2, alpha=0.4) +
+  geom_smooth(span = 0.1, se = F, size = 0.5, method = "loess") +
+  scale_x_continuous(breaks = seq(0, 70, 5)) +
+  theme_cowplot(font_size = 12, rel_small = 10/12) +
+  labs(x="Time (h)", y = "Median red normalized by length")
+
+red_area <- clean_plate %>%
+  dplyr::group_by(replicate, timepoint, row, col) %>%
+  dplyr::summarize(median.red = median(red/EXT), .groups = "drop") %>%
+  ggplot(.) +
+  aes(x = as.numeric(timepoint), y = median.red) + 
+  geom_boxplot(aes(group = timepoint), outlier.alpha = 0) +
+  geom_jitter(size=0.2, width=0.2, alpha=0.4) +
+  geom_smooth(span = 0.1, se = F, size = 0.5, method = "loess") +
+  scale_x_continuous(breaks = seq(0, 70, 5)) +
+  theme_cowplot(font_size = 12, rel_small = 10/12) +
+  labs(x="Time (h)", y = "Median red normalized by area")
+
+red_vol <- clean_plate %>%
+  dplyr::mutate(volume = pi*(norm.EXT/2)^2*TOF) %>%
+  dplyr::group_by(replicate, timepoint, row, col) %>%
+  dplyr::summarize(median.red = median(red/volume), .groups = "drop") %>%
+  ggplot(.) +
+  aes(x = as.numeric(timepoint), y = median.red) + 
+  geom_boxplot(aes(group = timepoint), outlier.alpha = 0) +
+  geom_jitter(size=0.2, width=0.2, alpha=0.4) +
+  geom_smooth(span = 0.1, se = F, size = 0.5, method = "loess") +
+  scale_x_continuous(breaks = seq(0, 70, 5)) +
+  theme_cowplot(font_size = 12, rel_small = 10/12) +
+  labs(x="Time (h)", y = "Median red normalized by volume")
+
+cowplot::plot_grid(red, red_tof, red_area, red_vol, nrow = 4, align = "hv")
+```
+
+#### Local minima/maxima
+Using **median red normalized by area** we can find where a large proportion of the population has entered lethargus.  
+  
+This process has a few steps:  
+1. Summarizing the data to view the median norm.red value for each **replicate** at every hour. Leaving just 6 points at each hour.  
+2. Smoothing the above data using *lokerns::lokerns()*. This will perfrom kernal regression smoothing using a local plug-in bandwidth.  
+3. Calculate where the first derivative of the above function equals zero. This uses the *SplineUtils* package.  
+4. Extract the **time** associated with each local min/max and use this to estimate the entire population's median animal size at that time.  
+
+```{r echo=FALSE, message=FALSE, warning=FALSE, results = "hide"}
+par(mfrow=c(2,2))
+
+f.allmin_max <- function(norm.by) {
+#step 1
+  medianplate <- clean_plate %>%
+    dplyr::mutate(hour = as.numeric(timepoint), volume = pi*(norm.EXT/2)^2*TOF, norm.red = red/norm.by) %>%
+    dplyr::group_by(replicate, hour, timepoint) %>%
+    dplyr::summarize(median.norm.red = median(norm.red),
+                     median.Length = median(TOF), 
+                     median.Width = median(norm.EXT),
+                     median.Volume = median(volume), .groups = "drop")
+#step 2
+  step1_deriv <- lokern::lokerns(x=medianplate$hour, y=medianplate$median.norm.red, deriv=1, hetero = T)
+#step 3
+  step2_backsolve <- CubicInterpSplineAsPiecePoly(x=step1_deriv$x.out,y=step1_deriv$est,method="natural")
+  min_max <- dplyr::tibble(Hour = solve(step2_backsolve,b=0)) %>%
+    #dplyr::filter(Hour > 3, Hour < 60)
+    dplyr::filter(Hour > 8, Hour < 57)
+  step0 <- lokern::lokerns(x=medianplate$hour, y=medianplate$median.norm.red, deriv=0, hetero = T)
+  plot(step0); abline(v=min_max$Hour, col="blue")
+#step4
+  medianall <- medianplate %>%
+    dplyr::group_by(hour) %>%
+    dplyr::summarize(median.Length = median(median.Length),
+                     median.Width = median(median.Width),
+                     median.Volume = median(median.Volume),
+                     median.norm.red = median(median.norm.red), .groups = "drop")
+  finalLength <- lokern::lokerns(x = medianall$hour, y = medianall$median.Length, deriv=0, hetero=F)
+  Length <- dplyr::tibble(Length = predict(finalLength, min_max$Hour)$y)
+  finalWidth <- lokern::lokerns(x = medianall$hour, y = medianall$median.Width, deriv=0, hetero=F)
+  Width <- dplyr::tibble(Width = predict(finalWidth, min_max$Hour)$y)
+  finalVolume <- lokern::lokerns(x = medianall$hour, y = medianall$median.Volume, deriv=0, hetero=F)
+  Volume <- dplyr::tibble(Volume = predict(finalVolume, min_max$Hour)$y)
+  finalred <- lokern::lokerns(x = medianall$hour, y = medianall$median.norm.red, deriv=0, hetero=T)
+  red <- dplyr::tibble(norm.red = predict(finalred, min_max$Hour)$y)
+
+#put it all together
+  values <- dplyr::bind_cols(min_max, Length, Width, Volume, red) #%>%
+    #dplyr::mutate(Fluorescence = c("max","min","max","min","max","min","max","min","max")) %>%
+    #dplyr::select(Fluorescence, Hour, Length, Width, Volume, norm.red)
+
+  return(values)
+  
+}
+
+#put it all together
+minmax_raw <- f.allmin_max(1) %>%
+  dplyr::filter(Hour > 12.5) %>%
+  dplyr::mutate(red.raw = norm.red,
+                Hour_raw = Hour) %>%
+  dplyr::select(Hour_raw, red.raw)
+
+minmax_len <- f.allmin_max(clean_plate$TOF) %>%
+  dplyr::mutate(red.norm.len = norm.red,
+                Hour_norm.len = Hour) %>%
+  dplyr::select(Hour_norm.len, red.norm.len)
+
+minmax_area <- f.allmin_max(clean_plate$EXT) %>%
+  dplyr::mutate(red.norm.area = norm.red,
+                Hour_norm.area = Hour) %>%
+  dplyr::select(Hour_norm.area, red.norm.area)
+
+minmax_vol <- clean_plate %>%
+  dplyr::mutate(volume = pi*(norm.EXT/2)^2*TOF) %>%
+  dplyr::pull(volume) %>%
+  f.allmin_max() %>%
+  dplyr::filter(Hour > 12) %>%
+  dplyr::mutate(red.norm.vol = norm.red,
+                Hour_norm.vol = Hour) %>%
+  dplyr::select(Hour_norm.vol, red.norm.vol)
+
+
+bind_cols(minmax_raw, minmax_len, minmax_area, minmax_vol) %>%
+  dplyr::mutate(Fluorescence = c("min","max","min","max","min","max","min","max"),
+                Peak = c(1,2,3,4,5,6,7,8)) %>%
+  dplyr::select(Peak, Fluorescence, Hour_raw, Hour_norm.len, Hour_norm.area, Hour_norm.vol,
+                red.raw, red.norm.len, red.norm.area, red.norm.vol) %>%
+  dplyr::filter(Fluorescence == "min") %>%
+  knitr::kable(caption = "Fluorescence Minima")
+
+bind_cols(minmax_raw, minmax_len, minmax_area, minmax_vol) %>%
+  dplyr::mutate(Fluorescence = c("min","max","min","max","min","max","min","max"),
+                Peak = c(1,2,3,4,5,6,7,8)) %>%
+  dplyr::select(Peak, Fluorescence, Hour_raw, Hour_norm.len, Hour_norm.area, Hour_norm.vol,
+                red.raw, red.norm.len, red.norm.area, red.norm.vol) %>%
+  dplyr::filter(Fluorescence == "max") %>%
+  knitr::kable(caption = "Fluorescence Maxima")
+```
+   
+   
+```{r, message=FALSE, warning=FALSE, include=FALSE}
+
+f.allmin_max <- function(norm.by) {
+#step 1
+  medianplate <- clean_plate %>%
+    dplyr::mutate(hour = as.numeric(timepoint), volume = pi*(norm.EXT/2)^2*TOF, norm.red = red/norm.by) %>%
+    dplyr::group_by(replicate, hour, timepoint) %>%
+    dplyr::summarize(median.norm.red = median(norm.red),
+                     median.Length = median(TOF), 
+                     median.Width = median(norm.EXT),
+                     median.Volume = median(volume), .groups = "drop")
+#step 2
+  step1_deriv <- lokern::lokerns(x=medianplate$hour, y=medianplate$median.norm.red, deriv=1, hetero = T)
+#step 3
+  step2_backsolve <- CubicInterpSplineAsPiecePoly(x=step1_deriv$x.out,y=step1_deriv$est,method="natural")
+  min_max <- dplyr::tibble(Hour = solve(step2_backsolve,b=0)) %>%
+    dplyr::filter(Hour > 3, Hour < 60)
+    #dplyr::filter(Hour > 6, Hour < 57)
+  step0 <- lokern::lokerns(x=medianplate$hour, y=medianplate$median.norm.red, deriv=0, hetero = T)
+  plot(step0); abline(v=min_max$Hour, col="blue")
+#step4
+  medianall <- medianplate %>%
+    dplyr::group_by(hour) %>%
+    dplyr::summarize(median.Length = median(median.Length),
+                     median.Width = median(median.Width),
+                     median.Volume = median(median.Volume),
+                     median.norm.red = median(median.norm.red), .groups = "drop")
+  finalLength <- lokern::lokerns(x = medianall$hour, y = medianall$median.Length, deriv=0, hetero=F)
+  Length <- dplyr::tibble(Length = predict(finalLength, min_max$Hour)$y)
+  finalWidth <- lokern::lokerns(x = medianall$hour, y = medianall$median.Width, deriv=0, hetero=F)
+  Width <- dplyr::tibble(Width = predict(finalWidth, min_max$Hour)$y)
+  finalVolume <- lokern::lokerns(x = medianall$hour, y = medianall$median.Volume, deriv=0, hetero=F)
+  Volume <- dplyr::tibble(Volume = predict(finalVolume, min_max$Hour)$y)
+  finalred <- lokern::lokerns(x = medianall$hour, y = medianall$median.norm.red, deriv=0, hetero=T)
+  red <- dplyr::tibble(norm.red = predict(finalred, min_max$Hour)$y)
+
+#put it all together
+  values <- dplyr::bind_cols(min_max, Length, Width, Volume, red) #%>%
+    #dplyr::mutate(Fluorescence = c("max","min","max","min","max","min","max","min","max")) %>%
+    #dplyr::select(Fluorescence, Hour, Length, Width, Volume, norm.red)
+
+  return(values)
+}
+all.min_max <- f.allmin_max(clean_plate$EXT) %>%
+  dplyr::mutate(Fluorescence = c("max","min","max","min","max","min","max","min","max"),
+                Peak = c(1,2,3,4,5,6,7,8,9)) %>%
+  dplyr::select(Peak, Fluorescence, Hour, Length, Width, Volume, norm.red)
+  
+
+```
+
+   
+    
+#### Inflection Points
+It is also interesting to consider the inflection points of the normalized fluorescence data. These should define regions where the population is behaving similarly... (ie animals are growing or animals are preparing to molt).
+  
+```{r echo=FALSE, message=FALSE, warning=FALSE, results = "hide"}
+
+f.allinflection_pts <- function() {
+  #step 1
+  medianplate <- clean_plate %>%
+    dplyr::mutate(hour = as.numeric(timepoint), volume = pi*(norm.EXT/2)^2*TOF) %>%
+    dplyr::group_by(replicate, hour, timepoint) %>%
+    dplyr::summarize(median.Length = median(TOF), 
+                     median.Width = median(norm.EXT),
+                     median.Volume = median(volume),
+                     median.norm.red = median(red/EXT), .groups = "drop")
+  #step 2
+  step1_deriv <- lokern::lokerns(x=medianplate$hour, y=medianplate$median.norm.red, deriv=2, hetero = T)
+  #step 3
+  step2_backsolve <- CubicInterpSplineAsPiecePoly(x=step1_deriv$x.out,y=step1_deriv$est,method="natural")
+  min_max <- dplyr::tibble(Hour = solve(step2_backsolve,b=0)) %>%
+    dplyr::filter(Hour > 13.0, Hour < 58)
+  step0 <- lokern::lokerns(x=medianplate$hour, y=medianplate$median.norm.red, deriv=0, hetero = T)
+  plot(step0); abline(v=min_max$Hour, col="blue")
+  #step4
+  medianall <- clean_plate %>%
+    dplyr::mutate(hour = as.numeric(timepoint), volume = pi*(norm.EXT/2)^2*TOF) %>%
+    dplyr::group_by(hour) %>%
+    dplyr::summarize(median.Length = median(TOF),
+                     median.Width = median(norm.EXT),
+                     median.Volume = median(volume),
+                     median.norm.red = median(red/EXT), .groups = "drop")
+  finalLength <- lokern::lokerns(x = medianall$hour, y = medianall$median.Length, deriv=0, hetero=F)
+  Length <- dplyr::tibble(Length = predict(finalLength, min_max$Hour)$y)
+  finalWidth <- lokern::lokerns(x = medianall$hour, y = medianall$median.Width, deriv=0, hetero=F)
+  Width <- dplyr::tibble(Width = predict(finalWidth, min_max$Hour)$y)
+  finalVolume <- lokern::lokerns(x = medianall$hour, y = medianall$median.Volume, deriv=0, hetero=F)
+  Volume <- dplyr::tibble(Volume = predict(finalVolume, min_max$Hour)$y)
+  finalred <- lokern::lokerns(x = medianall$hour, y = medianall$median.norm.red, deriv=0, hetero=T)
+  red <- dplyr::tibble(norm.red = predict(finalred, min_max$Hour)$y)
+  #put it all together
+  inflection <- dplyr::bind_cols(min_max, Length, Width, Volume, red) %>%
+    dplyr::mutate(plotvals = c("min","max","min","max","min","max","min","max")) %>%
+    dplyr::select(plotvals, Hour, Length, Width, Volume, norm.red)
+    
+  return(inflection)
+}
+
+inflection <- f.allinflection_pts()
+
+#knitr::kable(inflection)
+
+```
+  
+#### Moments
+These inflection points should define areas where the population is doing the same thing. If we consider the areas of the above plot where animals are actively feeding (and therefore actively growing) I expect to observe low variance in animal size parameters here, but increased variance in the areas surrounding this growth. Let's see if this is supported when analyzing the data moments. *Note: I am using the student data to assess moments due to the data cleaning performed on the sorter data*
+
+```{r echo=FALSE, message=FALSE, warning=FALSE, fig.width = 12, fig.height = 8}
+students <- readr::read_csv(here::here("processed", "20191119_GA1", "all_student_measurements.csv"))
+inflection_min <- inflection %>% dplyr::filter(plotvals == "min") %>% pull(Hour)
+inflection_max <- inflection %>% dplyr::filter(plotvals == "max") %>% pull(Hour)
+ymin <- c(-Inf, -Inf, -Inf, -Inf); ymax <- c(Inf, Inf, Inf, Inf)
+plt <- data.frame(inflection_min, inflection_max, ymin, ymax)
+
+f.mmts <- function() {
+  mmts <- students %>%
+    dplyr::mutate(logVolume = log(Volume))%>%
+    dplyr::group_by(Hour, Student) %>% 
+    dplyr::summarize(var.Length = var(Length),
+                  cv.Length = (sd(Length, na.rm = TRUE) / mean(Length, na.rm = TRUE)),
+                  var.Width = var(Width),
+                  cv.Width = (sd(Width, na.rm = T) / mean(Width, na.rm = T)),
+                  var.Volume = var(Volume),
+                  cv.Volume = (sd(Volume, na.rm = T) / mean(Volume, na.rm = T)), .groups = "drop")
+    #tidyr::nest() %>%
+    #dplyr::ungroup() %>%
+    #dplyr::mutate(m1l = purrr::map_dbl(.$data,~moment(.x$Length, order = 1, central = FALSE)),
+     #             m2l = purrr::map_dbl(.$data,~moment(.x$Length, order = 2, central = TRUE)),
+      #            m3l = purrr::map_dbl(.$data,~moment(.x$Length, order = 3, central = TRUE)),
+       #           m4l = purrr::map_dbl(.$data,~moment(.x$Length, order = 4, central = TRUE)),
+        #          msigmal = sqrt(m2l), std_meanl = m1l/(msigmal), std_skewnessl = m3l/(msigmal^3), std_kurtosisl = m4l/(msigmal^4),
+         #         m1w = purrr::map_dbl(.$data,~moment(.x$Width, order = 1, central = FALSE)),
+          #        m2w = purrr::map_dbl(.$data,~moment(.x$Width, order = 2, central = TRUE)),
+           #       m3w = purrr::map_dbl(.$data,~moment(.x$Width, order = 3, central = TRUE)),
+            #      m4w = purrr::map_dbl(.$data,~moment(.x$Width, order = 4, central = TRUE)),
+             #     msigmaw = sqrt(m2w), std_meanw = m1w/(msigmaw), std_skewnessw = m3w/(msigmaw^3), std_kurtosisw = m4w/(msigmaw^4),
+              #    m1v = purrr::map_dbl(.$data,~moment(.x$Volume, order = 1, central = FALSE)),
+               #   m2v = purrr::map_dbl(.$data,~moment(.x$Volume, order = 2, central = TRUE)),
+                #  m3v = purrr::map_dbl(.$data,~moment(.x$Volume, order = 3, central = TRUE)),
+                 # m4v = purrr::map_dbl(.$data,~moment(.x$Volume, order = 4, central = TRUE)),
+                  #msigmav = sqrt(m2v), std_meanv = m1v/(msigmav), std_skewnessv = m3v/(msigmav^3), std_kurtosisv = m4v/(msigmav^4))
+    
+    
+    
+  var.l <- ggplot2::ggplot(mmts, aes(x=as.numeric(Hour),y=var.Length)) + geom_point(aes(fill=Student), shape=21,size=1.5) + theme_cowplot() +
+    geom_rect(data = plt, aes(xmin=inflection_min, xmax=inflection_max, ymin = ymin, ymax = ymax), fill = "gray", alpha = 0.2, inherit.aes = F) +
+    labs(title = "Variance (Length)", x = "Time (hours)", y = "") + theme(text = element_text(size=12)) + guides(fill = F)
+  cv.l <- ggplot2::ggplot(mmts, aes(x=as.numeric(Hour),y=cv.Length)) + geom_point(aes(fill=Student), shape=21,size=1.5) + theme_cowplot() +
+    geom_rect(data = plt, aes(xmin=inflection_min, xmax=inflection_max, ymin = ymin, ymax = ymax), fill = "gray", alpha = 0.2, inherit.aes = F) +
+    labs(title = "CV (Length)", x = "Time (hours)", y = "") + theme(text = element_text(size=12)) + guides(fill = F)
+  var.w <- ggplot2::ggplot(mmts, aes(x=as.numeric(Hour),y=var.Width)) + geom_point(aes(fill=Student), shape=21,size=1.5) + theme_cowplot() +
+    geom_rect(data = plt, aes(xmin=inflection_min, xmax=inflection_max, ymin = ymin, ymax = ymax), fill = "gray", alpha = 0.2, inherit.aes = F) +
+    labs(title = "Variance (Width)", x = "Time (hours)", y = "") + theme(text = element_text(size=12)) + guides(fill = F)
+  cv.w <- ggplot2::ggplot(mmts, aes(x=as.numeric(Hour),y=cv.Width)) + geom_point(aes(fill=Student), shape=21,size=1.5) + theme_cowplot() +
+    geom_rect(data = plt, aes(xmin=inflection_min, xmax=inflection_max, ymin = ymin, ymax = ymax), fill = "gray", alpha = 0.2, inherit.aes = F) +
+    labs(title = "CV (Width)", x = "Time (hours)", y = "") + theme(text = element_text(size=12)) + guides(fill = F)
+  var.v <- ggplot2::ggplot(mmts, aes(x=as.numeric(Hour),y=var.Volume)) + geom_point(aes(fill=Student), shape=21,size=1.5) + theme_cowplot() +
+    geom_rect(data = plt, aes(xmin=inflection_min, xmax=inflection_max, ymin = ymin, ymax = ymax), fill = "gray", alpha = 0.2, inherit.aes = F) +
+    labs(title = "Variance (Volume)", x = "Time (hours)", y = "") + theme(text = element_text(size=12)) + guides(fill = F)
+  cv.v <- ggplot2::ggplot(mmts, aes(x=as.numeric(Hour),y=cv.Volume)) + geom_point(aes(fill=Student), shape=21,size=1.5) + theme_cowplot() +
+    geom_rect(data = plt, aes(xmin=inflection_min, xmax=inflection_max, ymin = ymin, ymax = ymax), fill = "gray", alpha = 0.2, inherit.aes = F) +
+    labs(title = "CV (Volume)", x = "Time (hours)", y = "") + theme(text = element_text(size=12)) + guides(fill = F)
+  
+  #
+    
+###moments stuff####
+  m1l <- ggplot2::ggplot(mmts, aes(x=as.numeric(Hour),y=std_meanl)) + geom_point(aes(fill=Student), shape=21,size=1.5) + theme_cowplot() +
+    geom_rect(data = plt, aes(xmin=inflection_min, xmax=inflection_max, ymin = ymin, ymax = ymax), fill = "gray", alpha = 0.2, inherit.aes = F) +
+    labs(title = "Standardized Mean (Length)", x = "Time (hours)", y = "") + theme(text = element_text(size=12)) + guides(fill = F)
+  m3l <- ggplot2::ggplot(mmts, aes(x=as.numeric(Hour),y=std_skewnessl)) + geom_point(aes(fill=Student), shape=21,size=1.5) + theme_cowplot() +
+    geom_rect(data = plt, aes(xmin=inflection_min, xmax=inflection_max, ymin = ymin, ymax = ymax), fill = "gray", alpha = 0.2, inherit.aes = F) +
+    labs(title = "Standardized Skew (Length)", x = "Time (hours)", y = "") + theme(text = element_text(size=12)) + guides(fill = F)
+  m2l <- ggplot2::ggplot(mmts, aes(x=as.numeric(Hour),y=m2l)) + geom_point(aes(fill=Student),shape=21,size=1.5) + theme_cowplot() +
+    geom_rect(data = plt, aes(xmin=inflection_min, xmax=inflection_max, ymin = ymin, ymax = ymax), fill = "gray", alpha = 0.2, inherit.aes = F) +
+    labs(title = "Variance (Length)", x = "Time (hours)", y = "") + theme(text = element_text(size=12)) + guides(fill = F)
+  m1w <- ggplot2::ggplot(mmts, aes(x=as.numeric(Hour),y=std_meanw)) + geom_point(aes(fill=Student), shape=21,size=1.5) + theme_cowplot() +
+    geom_rect(data = plt, aes(xmin=inflection_min, xmax=inflection_max, ymin = ymin, ymax = ymax), fill = "gray", alpha = 0.2, inherit.aes = F) +
+    labs(title = "Standardized Mean (Width)", x = "Time (hours)", y = "") + theme(text = element_text(size=12)) + guides(fill = F)
+  m3w <- ggplot2::ggplot(mmts, aes(x=as.numeric(Hour),y=std_skewnessw)) + geom_point(aes(fill=Student), shape=21,size=1.5) + theme_cowplot() +
+    geom_rect(data = plt, aes(xmin=inflection_min, xmax=inflection_max, ymin = ymin, ymax = ymax), fill = "gray", alpha = 0.2, inherit.aes = F) +
+    labs(title = "Standardized Skew (Width)", x = "Time (hours)", y = "") + theme(text = element_text(size=12)) + guides(fill = F)
+  m2w <- ggplot2::ggplot(mmts, aes(x=as.numeric(Hour),y=m2w)) + geom_point(aes(fill=Student),shape=21,size=1.5) + theme_cowplot() +
+    geom_rect(data = plt, aes(xmin=inflection_min, xmax=inflection_max, ymin = ymin, ymax = ymax), fill = "gray", alpha = 0.2, inherit.aes = F) +
+    labs(title = "Variance (Width)", x = "Time (hours)", y = "") + theme(text = element_text(size=12)) + guides(fill = F)
+  m1v <- ggplot2::ggplot(mmts, aes(x=as.numeric(Hour),y=std_meanv)) + geom_point(aes(fill=Student), shape=21,size=1.5) + theme_cowplot() +
+    geom_rect(data = plt, aes(xmin=inflection_min, xmax=inflection_max, ymin = ymin, ymax = ymax), fill = "gray", alpha = 0.2, inherit.aes = F) +
+    labs(title = "Standardized Mean (Volume)", x = "Time (hours)", y = "") + theme(text = element_text(size=12)) + guides(fill = F)
+  m3v <- ggplot2::ggplot(mmts, aes(x=as.numeric(Hour),y=std_skewnessv)) + geom_point(aes(fill=Student), shape=21,size=1.5) + theme_cowplot() +
+    geom_rect(data = plt, aes(xmin=inflection_min, xmax=inflection_max, ymin = ymin, ymax = ymax), fill = "gray", alpha = 0.2, inherit.aes = F) +
+    labs(title = "Standardized Skew (Volume)", x = "Time (hours)", y = "") + theme(text = element_text(size=12)) + guides(fill = F)
+  m2v <- ggplot2::ggplot(mmts, aes(x=as.numeric(Hour),y=log(m2v))) + geom_point(aes(fill=Student),shape=21,size=1.5) + theme_cowplot() +
+    geom_rect(data = plt, aes(xmin=inflection_min, xmax=inflection_max, ymin = ymin, ymax = ymax), fill = "gray", alpha = 0.2, inherit.aes = F) +
+    labs(title = "Log Variance (Volume)", x = "Time (hours)", y = "") + theme(text = element_text(size=12)) + guides(fill = F) 
+#####  
+  all_mmts <- list(var.l, cv.l, var.w, cv.w, var.v, cv.v)
+  
+}
+  
+plot_grid(plotlist=f.mmts(), nrow=3,ncol=2, align = "hv", axis = "tblr")
+
+```
+
+
+#### Overlaying fluorescence on size data
+We can now overlay the timing of these local minima on the size parameters.  
+
++ Red Line = local minima of fluorescence  
++ Blue Line = local maxima of fluorescence  
++ Gray shaded area = region between inflection points corresponding to when animals are feeding (and subsequently growing) 
+
+```{r echo=FALSE, message=FALSE, warning=FALSE, fig.width = 8, fig.height = 10}
+mins <- all.min_max %>% dplyr::filter(Fluorescence == "min") %>% pull(Hour)
+maxs <- all.min_max %>% dplyr::filter(Fluorescence == "max") %>% pull(Hour)
+inflection_min <- inflection %>% dplyr::filter(plotvals == "min") %>% pull(Hour)
+inflection_max <- inflection %>% dplyr::filter(plotvals == "max") %>% pull(Hour)
+ymin <- c(-Inf, -Inf, -Inf, -Inf); ymax <- c(Inf, Inf, Inf, Inf)
+plt <- data.frame(inflection_min, inflection_max, ymin, ymax)
+
+red_area <- clean_plate %>%
+  dplyr::group_by(replicate, timepoint, row, col) %>%
+  dplyr::summarize(median.red = median(red/EXT), .groups = "drop") %>%
+  ggplot(.) +
+  aes(x = as.numeric(timepoint), y = median.red) + 
+  geom_boxplot(aes(group = timepoint), outlier.alpha = 0) +
+  geom_jitter(size=0.2, width=0.2, alpha=0.4) +
+  geom_smooth(span = 0.1, se = F, size = 0.5, method = "loess") +
+  scale_x_continuous(breaks = seq(0, 70, 5)) +
+  geom_vline(xintercept=c(mins), color="red", size = 0.3) +
+  #geom_vline(xintercept=c(maxs), color="blue", size = 0.3, alpha = 0.5) +
+  geom_rect(data = plt, aes(xmin=inflection_min, xmax=inflection_max, ymin = ymin, ymax = ymax), fill = "gray", alpha = 0.2, inherit.aes = F) +
+  theme_cowplot(font_size = 18, rel_small = 14/18) +
+  labs(x="Time (h)", y = "Median Red Fluorescence")
+
+length <- clean_plate %>%
+  dplyr::group_by(timepoint, replicate, row, col) %>%
+  dplyr::summarize(median.Length = median(TOF), .groups = "drop") %>%
+  ggplot(., aes(x = as.numeric(timepoint), y = median.Length)) +
+  geom_boxplot(aes(group = timepoint), outlier.alpha = 0) +
+  geom_jitter(size=0.1, width=0.2, alpha=0.2) +
+  scale_x_continuous(breaks = seq(0, 70, 5)) +
+  theme_cowplot(font_size = 18, rel_small = 14/18) +
+  geom_vline(xintercept=c(mins), color="red", size = 0.3) +
+  #geom_vline(xintercept=c(maxs[1]), color="blue", size = 0.3, alpha = 0.5) +
+  geom_rect(data = plt, aes(xmin=inflection_min, xmax=inflection_max, ymin = ymin, ymax = ymax), fill = "gray", alpha = 0.2, inherit.aes = F) +
+  labs(x="Time (h)", y = expression(paste("Median Length (", mu,"m)")))
+
+width <- clean_plate %>%
+  dplyr::group_by(timepoint, replicate, row, col) %>%
+  dplyr::summarize(median.Width = median(norm.EXT), .groups = "drop") %>%
+  ggplot(.) +
+  aes(x = as.numeric(timepoint), y = median.Width) +
+  geom_boxplot(aes(group = timepoint), outlier.alpha = 0) +
+  geom_jitter(size=0.1, width=0.2, alpha=0.2) +
+  scale_x_continuous(breaks = seq(0, 70, 5)) +
+  theme_cowplot(font_size = 12, rel_small = 10/12) +
+  geom_vline(xintercept=c(mins), color="red", size = 0.3) +
+  #geom_vline(xintercept=c(maxs[1]), color="blue", size = 0.3, alpha = 0.5) +
+  geom_rect(data = plt, aes(xmin=inflection_min, xmax=inflection_max, ymin = ymin, ymax = ymax), fill = "gray", alpha = 0.2, inherit.aes = F) +
+  labs(x="Time (h)", y = expression(paste("Median Width (", mu,"m)")))
+
+volume <- clean_plate %>%
+  dplyr::mutate(volume = pi*(norm.EXT/2)^2*TOF) %>%
+  dplyr::group_by(timepoint, replicate, row, col) %>%
+  dplyr::summarize(median.Volume = median(volume), .groups = "drop") %>%
+  ggplot(.) +
+  aes(x = as.numeric(timepoint), y = log(median.Volume)) +
+  geom_boxplot(aes(group = timepoint), outlier.alpha = 0) +
+  geom_jitter(size=0.1, width=0.2, alpha=0.2) +
+  scale_x_continuous(breaks = seq(0, 70, 5)) +
+  theme_cowplot(font_size = 12, rel_small = 10/12) +
+  geom_vline(xintercept=c(mins), color="red", size = 0.3) +
+  #geom_vline(xintercept=c(maxs[1]), color="blue", size = 0.3, alpha = 0.5) +
+  #scale_y_log10() +
+  geom_rect(data = plt, aes(xmin=inflection_min, xmax=inflection_max, ymin = ymin, ymax = ymax), fill = "gray", alpha = 0.2, inherit.aes = F) +
+  labs(x="Time (h)", y=expression(paste("log Median Volume (", mu, m^3,")")))
+
+cowplot::plot_grid(red_area, length, width, volume, ncol = 1, nrow = 4, align = "hv")
+```
+
+  
+#### Fraction of quiescent animals 
+We can also assess which individuals in the population are quiescent (not feeding) across development. This can be estimated using the median normalized red fluorescence value for the population at each local minima and grouping by replicate and well to find fraction quiescent. **Below, red = quiescent**  
+
+```{r echo=FALSE, fig.height=6, fig.width=10, message=FALSE, warning=FALSE}
+mins <- all.min_max %>% dplyr::filter(Fluorescence == "min") %>% pull(Hour)
+maxs <- all.min_max %>% dplyr::filter(Fluorescence == "max") %>% pull(Hour)
+inflection_min <- inflection %>% dplyr::filter(plotvals == "min") %>% pull(Hour)
+inflection_max <- inflection %>% dplyr::filter(plotvals == "max") %>% pull(Hour)
+ymin <- c(-Inf, -Inf, -Inf, -Inf); ymax <- c(Inf, Inf, Inf, Inf)
+plt <- data.frame(inflection_min, inflection_max, ymin, ymax)
+
+min.red <- all.min_max %>%
+  dplyr::filter(Fluorescence == "min") %>%
+  pull(norm.red) %>%
+  mean()
+
+quies <- clean_plate %>%
+  dplyr::mutate(Replicate = replicate, norm.red.area = red/EXT,
+                Quiescent = dplyr::case_when(norm.red.area <= min.red[1] ~ "yes",
+                                             TRUE ~ "no")) %>%
+  dplyr::group_by(Replicate, timepoint, row, col) %>%
+  dplyr::summarize(feeding = sum(Quiescent == "no"),
+                   notfeeding = sum(Quiescent == "yes"),
+                   fraction_quiescent = (notfeeding/(notfeeding + feeding)), .groups = "drop") %>%
+  ggplot(.) +
+  aes(x = as.numeric(timepoint), y = fraction_quiescent) +
+  geom_jitter(size = 0.5, width = 0.2) + 
+  scale_x_continuous(breaks = seq(0, 60, 5), limit = c(0,60)) +
+  geom_vline(xintercept=c(mins), color="red", size = 0.3) +
+  geom_rect(data = plt, aes(xmin=inflection_min, xmax=inflection_max, ymin = ymin, ymax = ymax), fill = "gray", alpha = 0.2, inherit.aes = F) +
+  theme_cowplot(font_size = 12, rel_small = 10/12) + 
+  labs(x = "Time (h)", y = "Fraction Quiescent")
+
+length <- clean_plate %>%
+  dplyr::mutate(Replicate = replicate, norm.red.area = red/EXT,
+                Quiescent = dplyr::case_when(norm.red.area <= min.red[1] ~ "yes",
+                                             TRUE ~ "no")) %>%
+  ggplot(.) +
+  aes(x = as.numeric(timepoint), y = TOF, color = Quiescent) + guides(color = F) +
+  geom_jitter(size = 0.1, width = 0.2, alpha = 0.1) + 
+  scale_x_continuous(breaks = seq(0, 60, 5), limit = c(0,60)) +
+  scale_color_manual(values = c("black", "red")) +
+  theme_cowplot(font_size = 12, rel_small = 10/12) + 
+  geom_rect(data = plt, aes(xmin=inflection_min, xmax=inflection_max, ymin = ymin, ymax = ymax), fill = "gray", alpha = 0.2, inherit.aes = F) +
+  labs(x = "Time (h)", y = expression(paste("Length (", mu,"m)")))
+
+width <- clean_plate %>%
+  dplyr::mutate(Replicate = replicate, norm.red.area = red/EXT,
+                Quiescent = dplyr::case_when(norm.red.area <= min.red[1] ~ "yes",
+                                             TRUE ~ "no")) %>%
+  ggplot(.) +
+  aes(x = as.numeric(timepoint), y = norm.EXT, color = Quiescent) + guides(color = F) +
+  geom_jitter(size = 0.1, width = 0.2, alpha = 0.1) + 
+  scale_x_continuous(breaks = seq(0, 60, 5), limit = c(0,60)) + ylim(0.5,5) +
+  scale_color_manual(values = c("black", "red")) +
+  theme_cowplot(font_size = 12, rel_small = 10/12) + 
+  geom_rect(data = plt, aes(xmin=inflection_min, xmax=inflection_max, ymin = ymin, ymax = ymax), fill = "gray", alpha = 0.2, inherit.aes = F) +
+  labs(x = "Time (h)", y = expression(paste("Width (", mu,"m)")))
+  
+volume <- clean_plate %>%
+  dplyr::mutate(volume = pi*(norm.EXT/2)^2*TOF, log.volume = log(volume),
+                Replicate = replicate, norm.red.area = red/EXT,
+                Quiescent = dplyr::case_when(norm.red.area <= min.red[1] ~ "yes",
+                                             TRUE ~ "no")) %>%
+  ggplot(.) +
+  aes(x = as.numeric(timepoint), y = log.volume, color = Quiescent) + guides(color = F) +
+  geom_jitter(size = 0.1, width = 0.2, alpha = 0.1) + 
+  scale_x_continuous(breaks = seq(0, 60, 5), limit = c(0,60)) +
+  scale_color_manual(values = c("black", "red")) +
+  theme_cowplot(font_size = 12, rel_small = 10/12) + 
+  geom_rect(data = plt, aes(xmin=inflection_min, xmax=inflection_max, ymin = ymin, ymax = ymax), fill = "gray", alpha = 0.2, inherit.aes = F) +
+  labs(x = "Time (h)", y = expression(paste("log Volume (", mu, m^3,")")))
+  
+plot_grid(length, width, volume, quies, nrow = 2, align = "hv")  
+```
+
+
+```{r eval=FALSE, fig.height=6, fig.width=8, message=FALSE, warning=FALSE, include=FALSE}
+# length vs width colored by quiescence for all the data
+clean_plate %>%
+  dplyr::filter(timepoint <= 50, TOF <600, norm.EXT <4) %>%
+  dplyr::mutate(norm.red.area = red/EXT,
+                Quiescent = dplyr::case_when(norm.red.area <= min.red[1] ~ "yes",
+                                             TRUE ~ "no")) %>%
+  ggplot(.) +
+  aes(x = TOF, y = norm.EXT, color = Quiescent) + guides(color = F) +
+  geom_point(size = 0.1, alpha = 0.1) + 
+  scale_color_manual(values = c("black", "red")) +
+  theme_cowplot(font_size = 16, rel_small = 12/16) + 
+  labs(x = "Length", y = "Width") 
+```
+
+
+Animation:
+```{r echo = FALSE, message = FALSE, fig.width = 4, fig.height = 6}
+# Animation!
+times <- all.min_max %>% dplyr::filter(Fluorescence == "min") %>% pull(Hour)
+min.red <- all.min_max %>%
+  dplyr::filter(Fluorescence == "min") %>%
+  pull(norm.red) %>%
+  mean()
+a <- clean_plate %>%
+  dplyr::group_by(timepoint, replicate, row, col) %>%
+  dplyr::summarize(median.red = median(red), median.EXT = median(EXT), median.norm.red.area = median(red/EXT),
+                   median.TOF = median(TOF), median.norm.EXT = median(norm.EXT), .groups = "drop") %>%
+  dplyr::mutate(Quiescent = dplyr::case_when(median.norm.red.area <= min.red ~ "yes",
+                                             TRUE ~ "no")) %>%
+  ggplot(.) +
+  aes(x = median.TOF, y = median.norm.EXT, color = Quiescent) +
+  geom_point(size = 0.8, alpha = 0.5) + 
+  scale_color_manual(values = c("black", "red")) +
+  theme_cowplot(font_size = 16, rel_small = 12/16) + 
+  labs(x = "Median Length", y = "Median Width", title = "Hour: {frame_time}") +
+  transition_time(as.integer(timepoint)) + shadow_trail(future = F, alpha = alpha/2, size = size/2)
+
+animate(a, renderer = gifski_renderer())
+```
+
+#### Sensitivity Analysis - Quiescence
+I am currently using the average median red value for all local minima to determine a threshold fluorescence defined as quiescence. What would happen if we change this threshold slightly?  
+
+```{r echo=FALSE, message=FALSE, warning=FALSE, fig.width = 10, fig.height = 12}
+mins <- all.min_max %>% dplyr::filter(Fluorescence == "min") %>% pull(Hour)
+
+medianall <- clean_plate %>%
+    dplyr::mutate(hour = as.numeric(timepoint), volume = pi*(norm.EXT/2)^2*TOF, norm.red = red/EXT) %>%
+    dplyr::group_by(hour) %>%
+    dplyr::summarize(median.Length = median(TOF),
+                     median.Width = median(norm.EXT),
+                     median.Volume = median(volume),
+                     median.norm.red = median(red/EXT),
+                     mean.norm.red = mean(norm.red),
+                     q25.norm.red = as.numeric(quantile(norm.red, probs = 0.25, na.rm = TRUE)[1]),
+                     q40.norm.red = as.numeric(quantile(norm.red, probs = 0.40, na.rm = TRUE)[1]),
+                     q60.norm.red = as.numeric(quantile(norm.red, probs = 0.60, na.rm = TRUE)[1]), 
+                     q75.norm.red = as.numeric(quantile(norm.red, probs = 0.75, na.rm = TRUE)[1]), .groups = "drop") 
+
+min.med.red <- lokern::lokerns(x = medianall$hour, y = medianall$median.norm.red, deriv=0, hetero=T) %>%
+  predict(., mins) %>% .$y %>% mean()
+min.mean.red <- lokern::lokerns(x = medianall$hour, y = medianall$mean.norm.red, deriv=0, hetero=T) %>%
+  predict(., mins) %>% .$y %>% mean()
+min.q25.red <- lokern::lokerns(x = medianall$hour, y = medianall$q25.norm.red, deriv=0, hetero=T) %>%
+  predict(., mins) %>% .$y %>% mean()
+min.q40.red <- lokern::lokerns(x = medianall$hour, y = medianall$q40.norm.red, deriv=0, hetero=T) %>%
+  predict(., mins) %>% .$y %>% mean()
+min.q60.red <- lokern::lokerns(x = medianall$hour, y = medianall$q60.norm.red, deriv=0, hetero=T) %>%
+  predict(., mins) %>% .$y %>% mean()
+min.q75.red <- lokern::lokerns(x = medianall$hour, y = medianall$q75.norm.red, deriv=0, hetero=T) %>%
+  predict(., mins) %>% .$y %>% mean()
+
+quies.med <- clean_plate %>%
+  dplyr::mutate(Replicate = replicate, norm.red.area = red/EXT,
+                Quiescent = dplyr::case_when(norm.red.area <= min.med.red[1] ~ "yes",
+                                             TRUE ~ "no")) %>%
+  dplyr::group_by(Replicate, timepoint, row, col) %>%
+  dplyr::summarize(feeding = sum(Quiescent == "no"),
+                   notfeeding = sum(Quiescent == "yes"),
+                   fraction_quiescent = (notfeeding/(notfeeding + feeding)), .groups = "drop") %>%
+  ggplot(.) +
+  aes(x = as.numeric(timepoint), y = fraction_quiescent) +
+  geom_jitter(size = 0.5, width = 0.2) + 
+  scale_x_continuous(breaks = seq(0, 60, 5), limit = c(0,60)) +
+  geom_vline(xintercept=c(mins), color="red", size = 0.3) +
+  geom_rect(data = plt, aes(xmin=inflection_min, xmax=inflection_max, ymin = ymin, ymax = ymax), fill = "gray", alpha = 0.2, inherit.aes = F) +
+  theme_cowplot(font_size = 12, rel_small = 10/12) + 
+  labs(title = "Threshold = median.norm.red", x = "Time (h)", y = "Fraction Quiescent")
+
+quies.mean <- clean_plate %>%
+  dplyr::mutate(Replicate = replicate, norm.red.area = red/EXT,
+                Quiescent = dplyr::case_when(norm.red.area <= min.mean.red[1] ~ "yes",
+                                             TRUE ~ "no")) %>%
+  dplyr::group_by(Replicate, timepoint, row, col) %>%
+  dplyr::summarize(feeding = sum(Quiescent == "no"),
+                   notfeeding = sum(Quiescent == "yes"),
+                   fraction_quiescent = (notfeeding/(notfeeding + feeding)), .groups = "drop") %>%
+  ggplot(.) +
+  aes(x = as.numeric(timepoint), y = fraction_quiescent) +
+  geom_jitter(size = 0.5, width = 0.2) + 
+  scale_x_continuous(breaks = seq(0, 60, 5), limit = c(0,60)) +
+  geom_vline(xintercept=c(mins), color="red", size = 0.3) +
+  geom_rect(data = plt, aes(xmin=inflection_min, xmax=inflection_max, ymin = ymin, ymax = ymax), fill = "gray", alpha = 0.2, inherit.aes = F) +
+  theme_cowplot(font_size = 12, rel_small = 10/12) + 
+  labs(title = "Threshold = mean.norm.red", x = "Time (h)", y = "Fraction Quiescent")
+
+quies.q25 <- clean_plate %>%
+  dplyr::mutate(Replicate = replicate, norm.red.area = red/EXT,
+                Quiescent = dplyr::case_when(norm.red.area <= min.q25.red[1] ~ "yes",
+                                             TRUE ~ "no")) %>%
+  dplyr::group_by(Replicate, timepoint, row, col) %>%
+  dplyr::summarize(feeding = sum(Quiescent == "no"),
+                   notfeeding = sum(Quiescent == "yes"),
+                   fraction_quiescent = (notfeeding/(notfeeding + feeding)), .groups = "drop") %>%
+  ggplot(.) +
+  aes(x = as.numeric(timepoint), y = fraction_quiescent) +
+  geom_jitter(size = 0.5, width = 0.2) + 
+  scale_x_continuous(breaks = seq(0, 60, 5), limit = c(0,60)) +
+  geom_vline(xintercept=c(mins), color="red", size = 0.3) +
+  geom_rect(data = plt, aes(xmin=inflection_min, xmax=inflection_max, ymin = ymin, ymax = ymax), fill = "gray", alpha = 0.2, inherit.aes = F) +
+  theme_cowplot(font_size = 12, rel_small = 10/12) + 
+  labs(title = "Threshold = q25.norm.red", x = "Time (h)", y = "Fraction Quiescent")
+
+quies.q40 <- clean_plate %>%
+  dplyr::mutate(Replicate = replicate, norm.red.area = red/EXT,
+                Quiescent = dplyr::case_when(norm.red.area <= min.q40.red[1] ~ "yes",
+                                             TRUE ~ "no")) %>%
+  dplyr::group_by(Replicate, timepoint, row, col) %>%
+  dplyr::summarize(feeding = sum(Quiescent == "no"),
+                   notfeeding = sum(Quiescent == "yes"),
+                   fraction_quiescent = (notfeeding/(notfeeding + feeding)), .groups = "drop") %>%
+  ggplot(.) +
+  aes(x = as.numeric(timepoint), y = fraction_quiescent) +
+  geom_jitter(size = 0.5, width = 0.2) + 
+  scale_x_continuous(breaks = seq(0, 60, 5), limit = c(0,60)) +
+  geom_vline(xintercept=c(mins), color="red", size = 0.3) +
+  geom_rect(data = plt, aes(xmin=inflection_min, xmax=inflection_max, ymin = ymin, ymax = ymax), fill = "gray", alpha = 0.2, inherit.aes = F) +
+  theme_cowplot(font_size = 12, rel_small = 10/12) + 
+  labs(title = "Threshold = q40.norm.red", x = "Time (h)", y = "Fraction Quiescent")
+
+quies.q60 <- clean_plate %>%
+  dplyr::mutate(Replicate = replicate, norm.red.area = red/EXT,
+                Quiescent = dplyr::case_when(norm.red.area <= min.q60.red[1] ~ "yes",
+                                             TRUE ~ "no")) %>%
+  dplyr::group_by(Replicate, timepoint, row, col) %>%
+  dplyr::summarize(feeding = sum(Quiescent == "no"),
+                   notfeeding = sum(Quiescent == "yes"),
+                   fraction_quiescent = (notfeeding/(notfeeding + feeding)), .groups = "drop") %>%
+  ggplot(.) +
+  aes(x = as.numeric(timepoint), y = fraction_quiescent) +
+  geom_jitter(size = 0.5, width = 0.2) + 
+  scale_x_continuous(breaks = seq(0, 60, 5), limit = c(0,60)) +
+  geom_vline(xintercept=c(mins), color="red", size = 0.3) +
+  geom_rect(data = plt, aes(xmin=inflection_min, xmax=inflection_max, ymin = ymin, ymax = ymax), fill = "gray", alpha = 0.2, inherit.aes = F) +
+  theme_cowplot(font_size = 12, rel_small = 10/12) + 
+  labs(title = "Threshold = q60.norm.red", x = "Time (h)", y = "Fraction Quiescent")
+
+quies.q75 <- clean_plate %>%
+  dplyr::mutate(Replicate = replicate, norm.red.area = red/EXT,
+                Quiescent = dplyr::case_when(norm.red.area <= min.q75.red[1] ~ "yes",
+                                             TRUE ~ "no")) %>%
+  dplyr::group_by(Replicate, timepoint, row, col) %>%
+  dplyr::summarize(feeding = sum(Quiescent == "no"),
+                   notfeeding = sum(Quiescent == "yes"),
+                   fraction_quiescent = (notfeeding/(notfeeding + feeding)), .groups = "drop") %>%
+  ggplot(.) +
+  aes(x = as.numeric(timepoint), y = fraction_quiescent) +
+  geom_jitter(size = 0.5, width = 0.2) + 
+  scale_x_continuous(breaks = seq(0, 60, 5), limit = c(0,60)) +
+  geom_vline(xintercept=c(mins), color="red", size = 0.3) +
+  geom_rect(data = plt, aes(xmin=inflection_min, xmax=inflection_max, ymin = ymin, ymax = ymax), fill = "gray", alpha = 0.2, inherit.aes = F) +
+  theme_cowplot(font_size = 12, rel_small = 10/12) + 
+  labs(title = "Threshold = q75.norm.red", x = "Time (h)", y = "Fraction Quiescent")
+
+cowplot::plot_grid(quies.q25, quies.q40, quies.med, quies.mean, quies.q60, quies.q75, nrow = 3, align = "hv")
+
+```
+
+
+```{r echo=FALSE, message=FALSE, warning=FALSE, fig.width = 10, fig.height = 12}
+times <- all.min_max %>% dplyr::filter(Fluorescence == "min") %>% pull(Hour)
+med <- clean_plate %>%
+  dplyr::filter(timepoint <= 55) %>%
+  dplyr::group_by(timepoint, replicate, row, col) %>%
+  dplyr::summarize(median.Length = median(TOF),
+                     median.Width = median(norm.EXT),
+                     median.norm.red = median(red/EXT),
+                     mean.norm.red = mean(norm.red),
+                     q25.norm.red = as.numeric(quantile(norm.red, probs = 0.25, na.rm = TRUE)[1]),
+                     q40.norm.red = as.numeric(quantile(norm.red, probs = 0.40, na.rm = TRUE)[1]),
+                     q60.norm.red = as.numeric(quantile(norm.red, probs = 0.60, na.rm = TRUE)[1]), 
+                     q75.norm.red = as.numeric(quantile(norm.red, probs = 0.75, na.rm = TRUE)[1]), .groups = "drop") %>%
+  dplyr::mutate(Quiescent = dplyr::case_when(timepoint >= times[1] & median.norm.red <= min.med.red ~ "yes",
+                                             TRUE ~ "no")) %>%
+  ggplot(.) +
+  aes(x = median.Length, y = median.Width, color = Quiescent) +
+  geom_point(size = 0.3, alpha = 0.3) + guides(color = F) +
+  scale_color_manual(values = c("black", "red")) +
+  theme_cowplot(font_size = 16, rel_small = 12/16) +
+  labs(title = "Threshold = median.norm.red", x = "Median Length", y = "Median Width")
+mea <- clean_plate %>%
+  dplyr::filter(timepoint <= 55) %>%
+  dplyr::group_by(timepoint, replicate, row, col) %>%
+  dplyr::summarize(median.Length = median(TOF),
+                     median.Width = median(norm.EXT),
+                     median.norm.red = median(red/EXT),
+                     mean.norm.red = mean(norm.red),
+                     q25.norm.red = as.numeric(quantile(norm.red, probs = 0.25, na.rm = TRUE)[1]),
+                     q40.norm.red = as.numeric(quantile(norm.red, probs = 0.40, na.rm = TRUE)[1]),
+                     q60.norm.red = as.numeric(quantile(norm.red, probs = 0.60, na.rm = TRUE)[1]), 
+                     q75.norm.red = as.numeric(quantile(norm.red, probs = 0.75, na.rm = TRUE)[1]), .groups = "drop") %>%
+  dplyr::mutate(Quiescent = dplyr::case_when(timepoint >= times[1] & median.norm.red <= min.mean.red ~ "yes",
+                                             TRUE ~ "no")) %>%
+  ggplot(.) +
+  aes(x = median.Length, y = median.Width, color = Quiescent) +
+  geom_point(size = 0.3, alpha = 0.3) + guides(color = F) +
+  scale_color_manual(values = c("black", "red")) +
+  theme_cowplot(font_size = 16, rel_small = 12/16) +
+  labs(title = "Threshold = mean.norm.red", x = "Median Length", y = "Median Width")
+q25 <- clean_plate %>%
+  dplyr::filter(timepoint <= 55) %>%
+  dplyr::group_by(timepoint, replicate, row, col) %>%
+  dplyr::summarize(median.Length = median(TOF),
+                     median.Width = median(norm.EXT),
+                     median.norm.red = median(red/EXT),
+                     mean.norm.red = mean(norm.red),
+                     q25.norm.red = as.numeric(quantile(norm.red, probs = 0.25, na.rm = TRUE)[1]),
+                     q40.norm.red = as.numeric(quantile(norm.red, probs = 0.40, na.rm = TRUE)[1]),
+                     q60.norm.red = as.numeric(quantile(norm.red, probs = 0.60, na.rm = TRUE)[1]), 
+                     q75.norm.red = as.numeric(quantile(norm.red, probs = 0.75, na.rm = TRUE)[1]), .groups = "drop") %>%
+  dplyr::mutate(Quiescent = dplyr::case_when(timepoint >= times[1] & median.norm.red <= min.q25.red ~ "yes",
+                                             TRUE ~ "no")) %>%
+  ggplot(.) +
+  aes(x = median.Length, y = median.Width, color = Quiescent) +
+  geom_point(size = 0.3, alpha = 0.3) + guides(color = F) +
+  scale_color_manual(values = c("black", "red")) +
+  theme_cowplot(font_size = 16, rel_small = 12/16) +
+  labs(title = "Threshold = q25.norm.red", x = "Median Length", y = "Median Width")
+q40 <- clean_plate %>%
+  dplyr::filter(timepoint <= 55) %>%
+  dplyr::group_by(timepoint, replicate, row, col) %>%
+  dplyr::summarize(median.Length = median(TOF),
+                     median.Width = median(norm.EXT),
+                     median.norm.red = median(red/EXT),
+                     mean.norm.red = mean(norm.red),
+                     q25.norm.red = as.numeric(quantile(norm.red, probs = 0.25, na.rm = TRUE)[1]),
+                     q40.norm.red = as.numeric(quantile(norm.red, probs = 0.40, na.rm = TRUE)[1]),
+                     q60.norm.red = as.numeric(quantile(norm.red, probs = 0.60, na.rm = TRUE)[1]), 
+                     q75.norm.red = as.numeric(quantile(norm.red, probs = 0.75, na.rm = TRUE)[1]), .groups = "drop") %>%
+  dplyr::mutate(Quiescent = dplyr::case_when(timepoint >= times[1] & median.norm.red <= min.q40.red ~ "yes",
+                                             TRUE ~ "no")) %>%
+  ggplot(.) +
+  aes(x = median.Length, y = median.Width, color = Quiescent) +
+  geom_point(size = 0.3, alpha = 0.3) + guides(color = F) +
+  scale_color_manual(values = c("black", "red")) +
+  theme_cowplot(font_size = 16, rel_small = 12/16) +
+  labs(title = "Threshold = q40.norm.red", x = "Median Length", y = "Median Width")
+q60 <- clean_plate %>%
+  dplyr::filter(timepoint <= 55) %>%
+  dplyr::group_by(timepoint, replicate, row, col) %>%
+  dplyr::summarize(median.Length = median(TOF),
+                     median.Width = median(norm.EXT),
+                     median.norm.red = median(red/EXT),
+                     mean.norm.red = mean(norm.red),
+                     q25.norm.red = as.numeric(quantile(norm.red, probs = 0.25, na.rm = TRUE)[1]),
+                     q40.norm.red = as.numeric(quantile(norm.red, probs = 0.40, na.rm = TRUE)[1]),
+                     q60.norm.red = as.numeric(quantile(norm.red, probs = 0.60, na.rm = TRUE)[1]), 
+                     q75.norm.red = as.numeric(quantile(norm.red, probs = 0.75, na.rm = TRUE)[1]), .groups = "drop") %>%
+  dplyr::mutate(Quiescent = dplyr::case_when(timepoint >= times[1] & median.norm.red <= min.q60.red ~ "yes",
+                                             TRUE ~ "no")) %>%
+  ggplot(.) +
+  aes(x = median.Length, y = median.Width, color = Quiescent) +
+  geom_point(size = 0.3, alpha = 0.3) + guides(color = F) +
+  scale_color_manual(values = c("black", "red")) +
+  theme_cowplot(font_size = 16, rel_small = 12/16) +
+  labs(title = "Threshold = q60.norm.red", x = "Median Length", y = "Median Width")
+q75 <- clean_plate %>%
+  dplyr::filter(timepoint <= 55) %>%
+  dplyr::group_by(timepoint, replicate, row, col) %>%
+  dplyr::summarize(median.Length = median(TOF),
+                     median.Width = median(norm.EXT),
+                     median.norm.red = median(red/EXT),
+                     mean.norm.red = mean(norm.red),
+                     q25.norm.red = as.numeric(quantile(norm.red, probs = 0.25, na.rm = TRUE)[1]),
+                     q40.norm.red = as.numeric(quantile(norm.red, probs = 0.40, na.rm = TRUE)[1]),
+                     q60.norm.red = as.numeric(quantile(norm.red, probs = 0.60, na.rm = TRUE)[1]), 
+                     q75.norm.red = as.numeric(quantile(norm.red, probs = 0.75, na.rm = TRUE)[1]), .groups = "drop") %>%
+  dplyr::mutate(Quiescent = dplyr::case_when(timepoint >= times[1] & median.norm.red <= min.q75.red ~ "yes",
+                                             TRUE ~ "no")) %>%
+  ggplot(.) +
+  aes(x = median.Length, y = median.Width, color = Quiescent) +
+  geom_point(size = 0.3, alpha = 0.3) + guides(color = F) +
+  scale_color_manual(values = c("black", "red")) +
+  theme_cowplot(font_size = 16, rel_small = 12/16) +
+  labs(title = "Threshold = q75.norm.red", x = "Median Length", y = "Median Width")
+
+cowplot::plot_grid(q25, q40, med, mea, q60, q75, nrow = 3, align = "hv")
+```
+
+
+#### Calculating rate of growth given regions defined by inflection points  
+We can now use the bounds set by the inflection points to determine rate of growth within each larval stage. 
+There are many ways in which we can calculate rate:  
+
+  1. Pool all data together and calculate a single rate, incorporating life stage and replicate as random effects.
+  2. Break all data out into life stages. Fit separate models for each life stage.
+  3. Break #2 out further into replicates. In this way there will be 6 models for each life stage.  
+  
+Let's go with #1... **Fitting Mixed Effect Model to All Data**
+To do this, I first pull the shaded regions designated by the inflection points. I standardize the *time* for each into the unitless variable *window*. This allows me to compare animals from all life stages together.
+```{r echo=FALSE, message=FALSE, warning=FALSE, fig.width = 12, fig.height = 4}
+library(scales); library(insight); library(ggeffects)
+L1_max.time <- all.min_max %>% dplyr::filter(Fluorescence == "min") %>% pull(Hour) %>% .[1]
+L1_min.time <- all.min_max %>% dplyr::filter(Fluorescence == "max") %>% pull(Hour) %>% .[1]
+inflection_min <- inflection %>% dplyr::filter(plotvals == "min") %>% pull(Hour)
+inflection_max <- inflection %>% dplyr::filter(plotvals == "max") %>% pull(Hour)
+
+part1 <- clean_plate %>%
+  dplyr::mutate(hour = as.numeric(timepoint), volume = pi*(norm.EXT/2)^2*TOF, 
+                logTOF = log(TOF), lognorm.EXT = log(norm.EXT), logvolume = log(volume),
+                stage = dplyr::case_when(hour >= L1_min.time & hour <= L1_max.time ~ "L1",
+                                         hour >= min.time[1] & hour <= max.time[1] ~ "L2",
+                                         hour >= min.time[2] & hour <= max.time[2] ~ "L3",
+                                         hour >= min.time[3] & hour <= max.time[3] ~ "L4",
+                                         hour >= min.time[4] & hour <= max.time[4] ~ "Adult"),
+                stage = factor(stage, levels = c("L1", "L2", "L3", "L4", "Adult"))) %>%
+  dplyr::filter(stage %in% c("L1", "L2", "L3", "L4", "Adult")) %>%
+  dplyr::group_by(stage) %>%
+  dplyr::mutate(std.TOF = scales::rescale(TOF, to = c(0,100)),
+                std.normEXT = scales::rescale(norm.EXT, to = c(0,100)),
+                std.Volume = scales::rescale(volume, to = c(0,100))) %>%
+  dplyr::ungroup() %>%
+  dplyr::group_by(timepoint, stage) %>%
+  nest() %>%
+  dplyr::bind_cols(window = c(1,2,3,4,5,6,7,1,2,3,4,5,6,1,2,3,4,5,1,2,3,4,5,1,2,3,4,5)) %>%
+  dplyr::select(window, timepoint, stage, data) %>%
+  unnest(cols = c(data)) %>%
+  dplyr::filter(!window >= 6) %>%
+  ungroup()
+
+ggplot(part1) + 
+  aes(x = window, y = std.TOF, color = stage) + 
+  geom_jitter(size = 0.3, alpha = 0.3) +
+  theme_cowplot(font_size = 16, rel_small = 12/16)
+
+#lme_t1 <- lme4::lmer(TOF~window + (window|stage/replicate), data = part1, REML = F)
+#lme_t1.s <- lme4::lmer(std.TOF~window + (window|stage/replicate), data = part1, REML = F)
+lme_t2 <- lme4::lmer(TOF~window + stage + (stage|replicate), data = part1, REML = F)
+#lme_w1 <- lme4::lmer(norm.EXT~window + (window|stage/replicate), data = part1, REML = F)
+lme_w2 <- lme4::lmer(norm.EXT~window + stage + (stage|replicate), data = part1, REML = F)
+#lme_v1 <- lme4::lmer(volume~window + (window|stage/replicate), data = part1, REML = F)
+lme_v2 <- lme4::lmer(volume~window + stage + (stage|replicate), data = part1, REML = F)
+
+#summary(lme_t1)
+#insight::get_variance(lme_v2)
+#tab_model(lme_w1,lme_w2, show.ci = F, show.se = T, show.aic = T, show.icc = F,digits = 2)
+
+#ggplot(ggpredict(lme_t1, terms = c("window","stage"), type = "re")) + 
+  #geom_jitter(data = part1, aes(x = window, y = std.TOF), size = 0.3, alpha = 0.3) +
+  #geom_ribbon(aes(x = x, ymin = predicted - std.error, ymax = predicted + std.error), fill = "lightgrey", alpha = 0.5) +
+  #geom_line(aes(x = x, y = predicted, group = group, color = group), size = 1) +
+  #theme_cowplot(font_size = 16, rel_small = 12/16)
+
+tofplot <- ggpredict(lme_t2, terms = c("stage", "replicate"), type = "re") %>% plot() + panel_border() + theme_bw(12)
+tofpvals <- summary(emmeans::contrast(emmeans(lme_t2,"stage"), "tukey")) %>% dplyr::mutate(estimate = round(estimate, 3),
+                                                                                           SE = round(SE, 3),
+                                                                                           z.ratio = round(z.ratio, 1),
+                                                                                           p.value = round(p.value,3))
+widthplot <- ggpredict(lme_w2, terms = c("stage", "replicate"), type = "re") %>% plot() + panel_border() + theme_bw(12)
+widthpvals <- summary(emmeans::contrast(emmeans(lme_w2,"stage"), "tukey")) %>% dplyr::mutate(estimate = round(estimate, 3),
+                                                                                           SE = round(SE, 3),
+                                                                                           z.ratio = round(z.ratio, 1),
+                                                                                           p.value = round(p.value,3))
+volplot <- ggpredict(lme_v2, terms = c("stage", "replicate"), type = "re") %>% plot() + panel_border() + theme_bw(12)
+volpvals <- summary(emmeans::contrast(emmeans(lme_v2,"stage"), "tukey")) %>% dplyr::mutate(estimate = round(estimate, 3),
+                                                                                           SE = round(SE, 3),
+                                                                                           z.ratio = round(z.ratio, 1),
+                                                                                           p.value = round(p.value,3))
+
+cowplot::plot_grid(tofplot,widthplot,volplot, align = "hv", nrow = 1)
+sjPlot::tab_dfs(list(tofpvals,widthpvals,volpvals), title = c("Length", "Width", "Volume"), alternate.rows = T)
+
+#emmeans(lme_t1,specs = pairwise ~ stage)
+
+```
+  
+  
+```{r, echo = F}
+
+coef_tof <- coef(lme_t1)$replicate %>%
+  dplyr::mutate(combo = rownames(.)) %>%
+  tidyr::separate(combo, into = c("replicate", "stage"), sep = ":") %>%
+  dplyr::mutate(replicate = as.factor(replicate),
+                stage = factor(stage, levels = c("L1","L2", "L3", "L4", "Adult")),
+                intercept = .[[1]],
+                slope = window) %>%
+  dplyr::select(replicate, stage, slope, intercept)
+coef_wid <- coef(lme_w1)$replicate %>%
+  dplyr::mutate(combo = rownames(.)) %>%
+  tidyr::separate(combo, into = c("replicate", "stage"), sep = ":") %>%
+  dplyr::mutate(replicate = as.factor(replicate),
+                stage = factor(stage, levels = c("L1","L2", "L3", "L4", "Adult")),
+                intercept = .[[1]],
+                slope = window) %>%
+  dplyr::select(replicate, stage, slope, intercept)
+
+
+ggplot(coef_wid) + aes(x = stage, y = slope, color = replicate) +
+  geom_point(size = 2) + theme_cowplot()
+
+```
+  
+
+
+
+
+Now I ask the question of which model fits the data best: **Linear vs. Exponential**.  
+I use AIC to determine model fits for each size parameter: length, width, and volume.  
+
+**Delta AIC Table**
+```{r echo=FALSE, message=FALSE, warning=FALSE}
+#model fits
+L1_time <- all.min_max %>%
+  dplyr::filter(Fluorescence == "min") %>%
+  pull(Hour)
+min.time <- inflection %>%
+  dplyr::filter(plotvals == "min") %>%
+  pull(Hour)
+max.time <- inflection %>%
+  dplyr::filter(plotvals == "max") %>%
+  pull(Hour)
+
+rates <- clean_plate %>%
+  dplyr::mutate(hour = as.numeric(timepoint), volume = pi*(norm.EXT/2)^2*TOF, 
+                stage = dplyr::case_when(hour <= L1_time[1] ~ "L1",
+                                         hour >= min.time[1] & hour <= max.time[1] ~ "L2",
+                                         hour >= min.time[2] & hour <= max.time[2] ~ "L3",
+                                         hour >= min.time[3] & hour <= max.time[3] ~ "L4",
+                                         hour >= min.time[4] & hour <= max.time[4] ~ "Adult"),
+                stage = factor(stage, levels = c("L1", "L2", "L3", "L4", "Adult"))) %>%
+  dplyr::group_by(stage) %>%
+  dplyr::summarize(lm.rate_Length = lm(TOF~hour)$coefficients[[2]],
+                   exp.rate_Length = coef(nls(TOF~ I(exp(1)^(m*hour + b)), start = list(m = 0.05, b = 1), trace = F, 
+                                        nls.control(maxiter = 1000, tol = 10e-6)))[[1]],
+                   se.lm_Length = summary(lm(TOF~hour))$coef[[4]],
+                   se.exp_Length = summary(nls(TOF~ I(exp(1)^(m*hour + b)), start = list(m = 0.05, b = 1), trace = F, 
+                                        nls.control(maxiter = 1000, tol = 10e-6)))$coef[[3]],
+                   lm.rate_Width = lm(norm.EXT~hour)$coefficients[[2]],
+                   exp.rate_Width = coef(nls(norm.EXT~ I(exp(1)^(m*hour + b)), start = list(m = 0.05, b = 1), trace = F, 
+                                        nls.control(maxiter = 1000, tol = 10e-6)))[[1]],
+                   se.lm_Width = summary(lm(norm.EXT~hour))$coef[[4]],
+                   se.exp_Width = summary(nls(norm.EXT~ I(exp(1)^(m*hour + b)), start = list(m = 0.05, b = 1), trace = F, 
+                                        nls.control(maxiter = 1000, tol = 10e-6)))$coef[[3]],
+                   lm.rate_Volume = lm(volume~hour)$coefficients[[2]],
+                   exp.rate_Volume = coef(nls(volume~ I(exp(1)^(m*hour + b)), start = list(m = 0.05, b = 1), trace = F, 
+                                        nls.control(maxiter = 1000, tol = 10e-6)))[[1]],
+                   se.lm_Volume = summary(lm(volume~hour))$coef[[4]],
+                   se.exp_Volume = summary(nls(volume~ I(exp(1)^(m*hour + b)), start = list(m = 0.05, b = 1), trace = F, 
+                                        nls.control(maxiter = 1000, tol = 10e-6)))$coef[[3]],
+                   length.lm_AIC = AIC(lm(TOF~hour)),
+                   length.exp_AIC = AIC(nls(TOF~ I(exp(1)^(m*hour + b)), start = list(m = 0.05, b = 1), trace = F, 
+                                        nls.control(maxiter = 1000, tol = 10e-6))),
+                   width.lm_AIC = AIC(lm(norm.EXT~hour)),
+                   width.exp_AIC = AIC(nls(norm.EXT~ I(exp(1)^(m*hour + b)), start = list(m = 0.05, b = 1), trace = F, 
+                                        nls.control(maxiter = 1000, tol = 10e-6))),
+                   volume.lm_AIC = AIC(lm(volume~hour)),
+                   volume.exp_AIC = AIC(nls(volume~ I(exp(1)^(m*hour + b)), start = list(m = 0.05, b = 1), trace = F, 
+                                        nls.control(maxiter = 1000, tol = 10e-6))), .groups = "drop") %>%
+  na.omit()
+
+#showing AIC/BIC values 
+rates %>%
+  dplyr::mutate(length.min_AIC = purrr::map2_dbl(.$length.lm_AIC, .$length.exp_AIC, ~(min(.x, .y))),
+                length.max_AIC = purrr::map2_dbl(.$length.lm_AIC, .$length.exp_AIC, ~(max(.x, .y))),
+                width.min_AIC = purrr::map2_dbl(.$width.lm_AIC, .$width.exp_AIC, ~(min(.x, .y))),
+                width.max_AIC = purrr::map2_dbl(.$width.lm_AIC, .$width.exp_AIC, ~(max(.x, .y))),
+                volume.min_AIC = purrr::map2_dbl(.$volume.lm_AIC, .$volume.exp_AIC, ~(min(.x, .y))),
+                volume.max_AIC = purrr::map2_dbl(.$volume.lm_AIC, .$volume.exp_AIC, ~(max(.x, .y)))) %>%
+  dplyr::mutate(length =  length.max_AIC - length.min_AIC,
+                width = width.max_AIC - width.min_AIC,
+                volume = volume.max_AIC - volume.min_AIC) %>%
+  dplyr::mutate(bestfit_length = dplyr::case_when(length.lm_AIC == length.min_AIC ~ "Linear",
+                                            length.exp_AIC == length.min_AIC ~ "Exponential"),
+                bestfit_width = dplyr::case_when(width.lm_AIC == width.min_AIC ~ "Linear",
+                                            width.exp_AIC == width.min_AIC ~ "Exponential"),
+                bestfit_volume = dplyr::case_when(volume.lm_AIC == volume.min_AIC ~ "Linear",
+                                            volume.exp_AIC == volume.min_AIC ~ "Exponential")) %>%
+  dplyr::select(stage, bestfit_length, bestfit_width, bestfit_volume,
+                length, width, volume) %>%
+  tidyr::pivot_longer(cols = c(length, width, volume),
+                      names_to = c("Size Parameter"), values_to = c("AIC")) %>%
+  dplyr::mutate(AIC = round(AIC, 2)) %>%
+  tidyr::pivot_wider(names_from = "Size Parameter", values_from = "AIC") %>%
+  #knitr::kable()
+  sjPlot::tab_df(alternate.rows = T, title = "Delta AIC values")
+
+```
+  
+
+We can now compare the given rates. 
+
+```{r echo=FALSE, fig.height=4, fig.width=12, message=FALSE, warning=FALSE}
+rates %>% 
+  dplyr::select(stage, lm.rate_Length, se.lm_Length, lm.rate_Width, se.lm_Width, lm.rate_Volume, se.lm_Volume,
+                exp.rate_Length, exp.rate_Width, exp.rate_Volume, se.exp_Length, se.exp_Width, se.exp_Volume) %>%
+  tidyr::pivot_longer(cols = -stage,
+                      names_to = c("size"), values_to = c("value")) %>%
+  tidyr::separate(size, into = c("a","size"), sep = "_") %>%
+  tidyr::pivot_wider(names_from = "a", values_from = "value") %>%
+  ggplot(.) +
+  aes(x = stage, y = lm.rate, color = size) +
+  geom_point(size = 3) +
+  geom_errorbar(aes(x=stage, ymin=lm.rate-se.lm, ymax=lm.rate+se.lm),width = 0.15) +
+  theme_cowplot(font_size = 16, rel_small = 12/16) +
+  labs(x = "Larval Stage", y = "Linear Growth Rate") + facet_wrap(~size, scales = "free") + panel_border()
+
+
+rates %>% 
+  dplyr::select(stage, lm.rate_Length, se.lm_Length, lm.rate_Width, se.lm_Width, lm.rate_Volume, se.lm_Volume,
+                exp.rate_Length, exp.rate_Width, exp.rate_Volume, se.exp_Length, se.exp_Width, se.exp_Volume) %>%
+  tidyr::pivot_longer(cols = -stage,
+                      names_to = c("size"), values_to = c("value")) %>%
+  tidyr::separate(size, into = c("a","size"), sep = "_") %>%
+  tidyr::pivot_wider(names_from = "a", values_from = "value") %>%
+  ggplot(.) +
+  aes(x = stage, y = exp.rate, color = size) +
+  geom_point(size = 3) +
+  geom_errorbar(aes(x=stage, ymin=exp.rate-se.exp, ymax=exp.rate+se.exp),width = 0.15) +
+  theme_cowplot(font_size = 16, rel_small = 12/16) +
+  labs(x = "Larval Stage", y = "Exponential Growth Rate") + facet_wrap(~size, scales = "free") + panel_border()
+
+  
+```
+
+
+#### **Are the rates for each stage significantly different? **
+
+
+
+
+
+
+
+### Independent Replicates  
+Everything described thus far has evaluated ALL REPLICATE data together as one. However, this data set consists of 6 independent populations of animals grown simultaneously. Let's consider differences across these replicates next
+
+#### Replicate: Local minima/maxima
+```{r fig.height=8, fig.width=12, message=FALSE, warning=FALSE, include=FALSE}
+## functions for performing replicate analysis.
+
+# 1. Determine local minima/maxima
+
+par(mfrow=c(2,3))
+
+f.min_max <- function(rep) {
+#step 1
+  medianplate <- clean_plate %>%
+    dplyr::filter(replicate == rep) %>%
+    dplyr::mutate(hour = as.numeric(timepoint), volume = pi*(norm.EXT/2)^2*TOF) %>%
+    dplyr::group_by(replicate, hour, timepoint) %>%
+    dplyr::summarize(median.Length = median(TOF), 
+                   median.Width = median(norm.EXT),
+                   median.Volume = median(volume),
+                   median.norm.red = median(red/EXT), .groups = "drop")
+#step 2
+  step1_deriv <- lokern::lokerns(x=medianplate$hour, y=medianplate$median.norm.red, deriv=1, hetero = T)
+#step 3
+  step2_backsolve <- CubicInterpSplineAsPiecePoly(x=step1_deriv$x.out,y=step1_deriv$est,method="natural")
+  min_max <- dplyr::tibble(Hour = solve(step2_backsolve,b=0)) %>%
+    dplyr::filter(Hour > 12.3, Hour < 56)
+  step0 <- lokern::lokerns(x=medianplate$hour, y=medianplate$median.norm.red, deriv=0, hetero = T)
+  plot(step0, main = rep); abline(v=min_max$Hour, col="blue")
+#step4
+  medianall <- medianplate %>%
+    dplyr::group_by(hour) %>%
+    dplyr::summarize(median.Length = median(median.Length),
+                     median.Width = median(median.Width),
+                     median.Volume = median(median.Volume),
+                     median.norm.red = median(median.norm.red), .groups = "drop")
+  finalLength <- lokern::lokerns(x = medianall$hour, y = medianall$median.Length, deriv=0, hetero=F)
+  Length <- dplyr::tibble(Length = predict(finalLength, min_max$Hour)$y)
+  finalWidth <- lokern::lokerns(x = medianall$hour, y = medianall$median.Width, deriv=0, hetero=F)
+  Width <- dplyr::tibble(Width = predict(finalWidth, min_max$Hour)$y)
+  finalVolume <- lokern::lokerns(x = medianall$hour, y = medianall$median.Volume, deriv=0, hetero=F)
+  Volume <- dplyr::tibble(Volume = predict(finalVolume, min_max$Hour)$y)
+  finalred <- lokern::lokerns(x = medianall$hour, y = medianall$median.norm.red, deriv=0, hetero=T)
+  red <- dplyr::tibble(norm.red = predict(finalred, min_max$Hour)$y)
+
+#put it all together
+  values <- dplyr::bind_cols(min_max, Length, Width, Volume, red) %>%
+    dplyr::mutate(Fluorescence = c("min","max","min","max","min","max","min","max"),
+                  Replicate = rep,
+                  Peak = c(1,2,3,4,5,6,7,8)) %>%
+    dplyr::select(Peak, Fluorescence, Replicate, Hour, Length, Width, Volume, norm.red)
+
+  return(values)
+  
+}
+
+reps_minmax <- dplyr::bind_rows(f.min_max("R01"), f.min_max("R02"), f.min_max("R03"), 
+                 f.min_max("R04"), f.min_max("R05"), f.min_max("R06"))
+  
+
+#knitr::kable(reps_minmax)
+
+```
+
+
+#### Replicate: Inflection Points
+
+```{r fig.height=8, fig.width=12, message=FALSE, warning=FALSE, include=FALSE, paged.print=FALSE}
+
+# 2. Determine inflection points
+
+par(mfrow=c(2,3))
+
+## for a subset of behaving replicates
+inflection_pts <- function(rep) {
+  #step 1
+  medianplate <- clean_plate %>%
+    dplyr::filter(replicate == rep) %>%
+    dplyr::mutate(hour = as.numeric(timepoint), volume = pi*(norm.EXT/2)^2*TOF) %>%
+    dplyr::group_by(replicate, hour, timepoint) %>%
+    dplyr::summarize(median.Length = median(TOF), 
+                     median.Width = median(norm.EXT),
+                     median.Volume = median(volume),
+                     median.norm.red = median(red/EXT), .groups = "drop")
+  #step 2
+  step1_deriv <- lokern::lokerns(x=medianplate$hour, y=medianplate$median.norm.red, deriv=2, hetero = T)
+  #step 3
+  step2_backsolve <- CubicInterpSplineAsPiecePoly(x=step1_deriv$x.out,y=step1_deriv$est,method="natural")
+  min_max <- dplyr::tibble(Hour = solve(step2_backsolve,b=0)) %>%
+    dplyr::filter(Hour > 13.0, Hour < 58)
+  step0 <- lokern::lokerns(x=medianplate$hour, y=medianplate$median.norm.red, deriv=0, hetero = T)
+  plot(step0, main = rep); abline(v=min_max$Hour, col="blue")
+  #step4
+  medianall <- medianplate %>%
+    dplyr::group_by(hour) %>%
+    dplyr::summarize(median.Length = median(median.Length),
+                     median.Width = median(median.Width),
+                     median.Volume = median(median.Volume),
+                     median.norm.red = median(median.norm.red), .groups = "drop")
+  finalLength <- lokern::lokerns(x = medianall$hour, y = medianall$median.Length, deriv=0, hetero=F)
+  Length <- dplyr::tibble(Length = predict(finalLength, min_max$Hour)$y)
+  finalWidth <- lokern::lokerns(x = medianall$hour, y = medianall$median.Width, deriv=0, hetero=F)
+  Width <- dplyr::tibble(Width = predict(finalWidth, min_max$Hour)$y)
+  finalVolume <- lokern::lokerns(x = medianall$hour, y = medianall$median.Volume, deriv=0, hetero=F)
+  Volume <- dplyr::tibble(Volume = predict(finalVolume, min_max$Hour)$y)
+  finalred <- lokern::lokerns(x = medianall$hour, y = medianall$median.norm.red, deriv=0, hetero=T)
+  red <- dplyr::tibble(norm.red = predict(finalred, min_max$Hour)$y)
+  #put it all together
+  inflection <- dplyr::bind_cols(min_max, Length, Width, Volume, red) %>%
+    dplyr::mutate(plotvals = c("min","max","min","max","min","max","min","max"),
+                  Replicate = rep) %>%
+    dplyr::select(plotvals, Replicate, Hour, Length, Width, Volume, norm.red)
+
+  return(inflection)
+
+}
+
+reps_inflection <- dplyr::bind_rows(inflection_pts("R01"), inflection_pts("R02"), inflection_pts("R03"), inflection_pts("R04"))
+
+inflection_pts <- function(rep) {
+  #step 1
+  medianplate <- clean_plate %>%
+    dplyr::filter(replicate == rep) %>%
+    dplyr::mutate(hour = as.numeric(timepoint), volume = pi*(norm.EXT/2)^2*TOF) %>%
+    dplyr::group_by(replicate, hour, timepoint) %>%
+    dplyr::summarize(median.Length = median(TOF), 
+                     median.Width = median(norm.EXT),
+                     median.Volume = median(volume),
+                     median.norm.red = median(red/EXT), .groups = "drop")
+  #step 2
+  step1_deriv <- lokern::lokerns(x=medianplate$hour, y=medianplate$median.norm.red, deriv=2, hetero = T)
+  #step 3
+  step2_backsolve <- CubicInterpSplineAsPiecePoly(x=step1_deriv$x.out,y=step1_deriv$est,method="natural")
+  min_max <- dplyr::tibble(Hour = solve(step2_backsolve,b=0)) %>%
+    dplyr::filter(Hour > 13.0, Hour < 58)
+  step0 <- lokern::lokerns(x=medianplate$hour, y=medianplate$median.norm.red, deriv=0, hetero = T)
+  plot(step0, main = rep); abline(v=min_max$Hour, col="blue")
+  #step4
+  medianall <- medianplate %>%
+    dplyr::group_by(hour) %>%
+    dplyr::summarize(median.Length = median(median.Length),
+                     median.Width = median(median.Width),
+                     median.Volume = median(median.Volume),
+                     median.norm.red = median(median.norm.red), .groups = "drop")
+  finalLength <- lokern::lokerns(x = medianall$hour, y = medianall$median.Length, deriv=0, hetero=F)
+  Length <- dplyr::tibble(Length = predict(finalLength, min_max$Hour)$y)
+  finalWidth <- lokern::lokerns(x = medianall$hour, y = medianall$median.Width, deriv=0, hetero=F)
+  Width <- dplyr::tibble(Width = predict(finalWidth, min_max$Hour)$y)
+  finalVolume <- lokern::lokerns(x = medianall$hour, y = medianall$median.Volume, deriv=0, hetero=F)
+  Volume <- dplyr::tibble(Volume = predict(finalVolume, min_max$Hour)$y)
+  finalred <- lokern::lokerns(x = medianall$hour, y = medianall$median.norm.red, deriv=0, hetero=T)
+  red <- dplyr::tibble(norm.red = predict(finalred, min_max$Hour)$y)
+  #put it all together
+  inflection <- dplyr::bind_cols(min_max, Length, Width, Volume, red) %>%
+    dplyr::mutate(#plotvals = c("min","max","min","max","min","max","min","max"),
+                  Replicate = rep) %>%
+    dplyr::select(Replicate, Hour, Length, Width, Volume, norm.red)
+
+  return(inflection)
+
+}
+
+
+reps_inflection <- reps_inflection %>%
+  dplyr::bind_rows((inflection_pts("R05")[c(1,3,5,6,7,9,11,12),] %>% dplyr::mutate(plotvals = c("min","max","min","max","min","max","min","max"))),
+                   (inflection_pts("R06")[c(1,2,3,4,5,6,7,9),] %>% dplyr::mutate(plotvals = c("min","max","min","max","min","max","min","max"))))
+
+
+knitr::kable(reps_inflection)
+
+```
+
+#### Replicate: Fraction of quiescent animals 
+
+```{r fig.height=8, fig.width=12, message=FALSE, warning=FALSE, include=FALSE}
+# 3. Fraction quiescent
+
+frac_quiescent <- function(rep) {
+  min.red <- reps_minmax %>%
+    dplyr::filter(Replicate == rep) %>%
+    dplyr::filter(Fluorescence == "min") %>%
+    pull(norm.red)
+  times <- reps_minmax %>%
+    dplyr::filter(Replicate == rep) %>%
+    dplyr::filter(Fluorescence == "min") %>%
+    pull(Hour)
+  
+  quies <- clean_plate %>%
+    dplyr::filter(replicate == rep) %>%
+    dplyr::mutate(Replicate = replicate, norm.red.area = red/EXT,
+                  quiescent = dplyr::case_when(timepoint > 6 & timepoint <= times[1] & norm.red.area <= min.red[1] ~ "yes",
+                                               timepoint > times[1] & timepoint <= times[2] & norm.red.area <= min.red[1] ~ "yes",
+                                               timepoint > times[2] & timepoint <= times[3] & norm.red.area <= min.red[2] ~ "yes",
+                                               timepoint > times[3] & timepoint <= times[4] & norm.red.area <= min.red[3] ~ "yes",
+                                               timepoint > times[4] & norm.red.area <= min.red[4] ~ "yes",
+                                               TRUE ~ "no")) %>%
+    dplyr::group_by(Replicate, timepoint, row, col) %>%
+    dplyr::summarize(feeding = sum(quiescent == "no"),
+                     notfeeding = sum(quiescent == "yes"),
+                     fraction_quiescent = (notfeeding/(notfeeding + feeding)), .groups = "drop") %>%
+    ggplot(.) +
+    aes(x = as.numeric(timepoint), y = fraction_quiescent) +
+    geom_jitter(size = 0.5, width = 0.2) + 
+    scale_x_continuous(breaks = seq(0, 70, 5)) +
+    #geom_smooth(span = 0.1, se = F, size = 1.5, method = "loess") +
+    geom_rect(data = plt, aes(xmin=inflection_min, xmax=inflection_max, ymin = ymin, ymax = ymax), fill = "gray", alpha = 0.2, inherit.aes = F) +
+    theme_cowplot(font_size = 12, rel_small = 10/12) + 
+    labs(x = "Time (h)", y = "Fraction quiescent", title = rep)
+  
+  return(quies)
+}
+
+plot_grid(frac_quiescent("R01"), frac_quiescent("R02"), frac_quiescent("R02"),
+          frac_quiescent("R04"), frac_quiescent("R05"), frac_quiescent("R06"), nrow = 2, align = "hv")
+
+
+quiescent_volume <- function(rep) {
+  min.red <- reps_minmax %>%
+    dplyr::filter(Replicate == rep) %>%
+    dplyr::filter(Fluorescence == "min") %>%
+    pull(norm.red)
+  times <- reps_minmax %>%
+    dplyr::filter(Replicate == rep) %>%
+    dplyr::filter(Fluorescence == "min") %>%
+    pull(Hour)
+  
+  volume <- clean_plate %>%
+    dplyr::filter(replicate == rep) %>%
+    dplyr::mutate(volume = pi*(norm.EXT/2)^2*TOF,
+                  log.volume = log(volume),
+                  norm.red.area = red/EXT,
+                  Quiescent = dplyr::case_when(timepoint > 6 & timepoint <= times[1] & norm.red.area <= min.red[1] ~ "yes",
+                                               timepoint > times[1] & timepoint <= times[2] & norm.red.area <= min.red[1] ~ "yes",
+                                               timepoint > times[2] & timepoint <= times[3] & norm.red.area <= min.red[2] ~ "yes",
+                                               timepoint > times[3] & timepoint <= times[4] & norm.red.area <= min.red[3] ~ "yes",
+                                               timepoint > times[4] & norm.red.area <= min.red[4] ~ "yes",
+                                               TRUE ~ "no")) %>%
+    ggplot(.) +
+    aes(x = as.numeric(timepoint), y = log.volume, color = Quiescent) + guides(color = F) +
+    geom_jitter(size = 0.1, width = 0.2, alpha = 0.1) + 
+    scale_x_continuous(breaks = seq(0, 70, 5)) +
+    scale_color_manual(values = c("black", "red")) +
+    theme_cowplot(font_size = 12, rel_small = 10/12) + 
+    geom_rect(data = plt, aes(xmin=inflection_min, xmax=inflection_max, ymin = ymin, ymax = ymax), fill = "gray", alpha = 0.2, inherit.aes = F) +
+    labs(x = "Time (h)", y = expression(paste("log Volume (", mu, m^3,")")), title = rep)
+  
+  return(volume)
+}
+
+plot_grid(quiescent_volume("R01"), quiescent_volume("R02"), quiescent_volume("R02"),
+          quiescent_volume("R04"), quiescent_volume("R05"), quiescent_volume("R06"), nrow = 2, align = "hv")
+
+
+```
+
+
+#### Calculating model fits 
+  
+values > 1 indicate **exponential** fit is best.  
+values < 1 indicate **linear** fit is best.
+
+```{r eval=FALSE, fig.height=4, fig.width=10, message=FALSE, warning=FALSE, include=FALSE}
+# 4. model fits
+L1_time <- reps_minmax %>%
+  dplyr::filter(Fluorescence == "min") %>%
+  pull(Hour) %>% .[1]
+min.time <- reps_inflection %>%
+  dplyr::filter(plotvals == "min") %>%
+  pull(Hour)
+max.time <- reps_inflection %>%
+  dplyr::filter(plotvals == "max") %>%
+  pull(Hour)
+
+
+f.rates <- function(rep) {
+  
+  rate_info <- clean_plate %>%
+    dplyr::filter(replicate == rep) %>%
+    dplyr::mutate(hour = as.numeric(timepoint), volume = pi*(norm.EXT/2)^2*TOF, 
+                  stage = dplyr::case_when(hour <= L1_max.time ~ "L1",
+                                           hour >= min.time[1] & hour <= max.time[1] ~ "L2",
+                                           hour >= min.time[2] & hour <= max.time[2] ~ "L3",
+                                           hour >= min.time[3] & hour <= max.time[3] ~ "L4",
+                                           hour >= min.time[4] & hour <= max.time[4] ~ "Adult"),
+                  stage = factor(stage, levels = c("L1", "L2", "L3", "L4", "Adult"))) %>%
+    dplyr::group_by(replicate, stage) %>%
+    dplyr::summarize(lm.rate_Length = lm(TOF~hour)$coefficients[[2]],
+                     exp.rate_Length = coef(nls(TOF~ I(exp(1)^(m*hour + b)), start = list(m = 0.05, b = 1), trace = F, 
+                                          nls.control(maxiter = 1000, tol = 10e-6)))[[1]],
+                     se.lm_Length = summary(lm(TOF~hour))$coef[[4]],
+                     se.exp_Length = summary(nls(TOF~ I(exp(1)^(m*hour + b)), start = list(m = 0.05, b = 1), trace = F, 
+                                          nls.control(maxiter = 1000, tol = 10e-6)))$coef[[3]],
+                     lm.rate_Width = lm(norm.EXT~hour)$coefficients[[2]],
+                     exp.rate_Width = coef(nls(norm.EXT~ I(exp(1)^(m*hour + b)), start = list(m = 0.05, b = 1), trace = F, 
+                                          nls.control(maxiter = 1000, tol = 10e-6)))[[1]],
+                     se.lm_Width = summary(lm(norm.EXT~hour))$coef[[4]],
+                     se.exp_Width = summary(nls(norm.EXT~ I(exp(1)^(m*hour + b)), start = list(m = 0.05, b = 1), trace = F, 
+                                          nls.control(maxiter = 1000, tol = 10e-6)))$coef[[3]],
+                     lm.rate_Volume = lm(volume~hour)$coefficients[[2]],
+                     exp.rate_Volume = coef(nls(volume~ I(exp(1)^(m*hour + b)), start = list(m = 0.05, b = 1), trace = F, 
+                                          nls.control(maxiter = 1000, tol = 10e-6)))[[1]],
+                     se.lm_Volume = summary(lm(volume~hour))$coef[[4]],
+                     se.exp_Volume = summary(nls(volume~ I(exp(1)^(m*hour + b)), start = list(m = 0.05, b = 1), trace = F, 
+                                          nls.control(maxiter = 1000, tol = 10e-6)))$coef[[3]],
+                     length.lm_AIC = AIC(lm(TOF~hour)),
+                     length.exp_AIC = AIC(nls(TOF~ I(exp(1)^(m*hour + b)), start = list(m = 0.05, b = 1), trace = F, 
+                                          nls.control(maxiter = 1000, tol = 10e-6))),
+                     width.lm_AIC = AIC(lm(norm.EXT~hour)),
+                     width.exp_AIC = AIC(nls(norm.EXT~ I(exp(1)^(m*hour + b)), start = list(m = 0.05, b = 1), trace = F, 
+                                          nls.control(maxiter = 1000, tol = 10e-6))),
+                     volume.lm_AIC = AIC(lm(volume~hour)),
+                     volume.exp_AIC = AIC(nls(volume~ I(exp(1)^(m*hour + b)), start = list(m = 0.05, b = 1), trace = F, 
+                                          nls.control(maxiter = 1000, tol = 10e-6))),
+                     volume.cubic_AIC = AIC(lm(volume~poly(hour, degree = 3, raw = T))), .groups = "drop") %>%
+    na.omit()
+    
+  return(rate_info)
+}
+
+reps_rates <- dplyr::bind_rows(f.rates("R01"), f.rates("R02"), f.rates("R03"), 
+                               f.rates("R04"), f.rates("R05"), f.rates("R06"))
+
+
+
+reps_rates %>%
+  dplyr::group_by(replicate, stage) %>%
+  dplyr::mutate(length.min_AIC = min(length.lm_AIC, length.exp_AIC),
+                length.max_AIC = max(length.lm_AIC, length.exp_AIC),
+                width.min_AIC = min(width.lm_AIC, width.exp_AIC),
+                width.max_AIC = max(width.lm_AIC, width.exp_AIC),
+                volume.min_AIC = min(volume.lm_AIC, volume.exp_AIC, volume.cubic_AIC),
+                volume.max_AIC = max(volume.lm_AIC, volume.exp_AIC, volume.cubic_AIC),
+                length = length.max_AIC - length.min_AIC,
+                width = width.max_AIC - width.min_AIC,
+                volume.cubic = volume.cubic_AIC - volume.min_AIC,
+                volume.lm = volume.lm_AIC - volume.min_AIC,
+                volume.exp = volume.exp_AIC - volume.min_AIC) %>%
+  dplyr::mutate(`Best fit length` = dplyr::case_when(length.lm_AIC == length.min_AIC ~ "Linear",
+                                                  length.exp_AIC == length.min_AIC ~ "Exponential"),
+                `Best fit width` = dplyr::case_when(width.lm_AIC == width.min_AIC ~ "Linear",
+                                                 width.exp_AIC == width.min_AIC ~ "Exponential"),
+                `Best fit volume` = dplyr::case_when(volume.lm_AIC == volume.min_AIC ~ "Linear",
+                                                  volume.exp_AIC == volume.min_AIC ~ "Exponential",
+                                                  volume.cubic_AIC == volume.min_AIC ~ "Cubic")) %>%
+  dplyr::ungroup() %>%
+  dplyr::select(replicate, stage, `Best fit length`, `Best fit width`, `Best fit volume`, 
+                length, width, volume.lm, volume.exp) %>%
+  dplyr::arrange(stage) %>%
+  sjPlot::tab_df(alternate.rows = T, title = "Delta AIC values")
+
+
+#showing AIC/BIC values
+reps_rates %>%
+  dplyr::mutate(length.min_AIC = purrr::map2_dbl(.$length.lm_AIC, .$length.exp_AIC, ~(min(.x, .y))),
+                length.max_AIC = purrr::map2_dbl(.$length.lm_AIC, .$length.exp_AIC, ~(max(.x, .y))),
+                width.min_AIC = purrr::map2_dbl(.$width.lm_AIC, .$width.exp_AIC, ~(min(.x, .y))),
+                width.max_AIC = purrr::map2_dbl(.$width.lm_AIC, .$width.exp_AIC, ~(max(.x, .y))),
+                volume.min_AIC = purrr::map2_dbl(.$volume.lm_AIC, .$volume.exp_AIC, ~(min(.x, .y))),
+                volume.max_AIC = purrr::map2_dbl(.$volume.lm_AIC, .$volume.exp_AIC, ~(max(.x, .y)))) %>%
+  dplyr::mutate(length =  length.max_AIC - length.min_AIC,
+                width = width.max_AIC - width.min_AIC,
+                volume = volume.max_AIC - volume.min_AIC) %>%
+  dplyr::mutate(bestfit_length = dplyr::case_when(length.lm_AIC == length.min_AIC ~ "Linear",
+                                            length.exp_AIC == length.min_AIC ~ "Exponential"),
+                bestfit_width = dplyr::case_when(width.lm_AIC == width.min_AIC ~ "Linear",
+                                            width.exp_AIC == width.min_AIC ~ "Exponential"),
+                bestfit_volume = dplyr::case_when(volume.lm_AIC == volume.min_AIC ~ "Linear",
+                                            volume.exp_AIC == volume.min_AIC ~ "Exponential")) %>%
+  dplyr::select(replicate, stage, bestfit_length, bestfit_width, bestfit_volume,
+                length, width, volume) %>%
+  tidyr::pivot_longer(cols = c(length, width, volume),
+                      names_to = c("Size Parameter"), values_to = c("AIC")) %>%
+  dplyr::mutate(AIC = round(AIC, 2)) %>%
+  tidyr::pivot_wider(names_from = "Size Parameter", values_from = "AIC") %>%
+  dplyr::arrange(stage) %>%
+  #knitr::kable()
+  sjPlot::tab_df(alternate.rows = T, title = "Delta AIC values") 
+```
+
+##### Replicate: Growth Rates
+
+##### **Linear: Length, Width, Volume , Exponential: Volume**  
+ 
+ 
+```{r eval=FALSE, fig.height=5, fig.width=10, message=FALSE, warning=FALSE, include=FALSE}
+
+# 5. Growth rates
+rate_len <- reps_rates %>%
+  ggplot(.) +
+  aes(x = stage, y = lm.rate_Length, color = replicate) +
+  #geom_boxplot(aes(group = stage), outlier.size = 0, width = 0.5) +
+  geom_point(size = 2, alpha = 0.8) + 
+  theme_cowplot(font_size = 16, rel_small = 12/16) + theme(legend.position = "top") +
+  geom_errorbar(aes(x=stage,ymin=lm.rate_Length-se.lm_Length, ymax=lm.rate_Length+se.lm_Length),width = 0.15) +
+  facet_wrap(~replicate) + panel_border() + 
+  labs(x = "Larval Stage", y=expression(paste("Length Growth Rate (", mu,"m",h^-1,")"))) 
+
+rate_wid <- reps_rates %>%
+  ggplot(.) +
+  aes(x = stage, y = rate_Width, color = replicate) +
+  #geom_boxplot(aes(group = stage), outlier.size = 0, width = 0.5) +
+  geom_point(size = 2, alpha = 0.8) + guides(color = F) +
+  theme_cowplot(font_size = 16, rel_small = 12/16) +
+  geom_errorbar(aes(x=stage,ymin=rate_Width-se.rate_Width,ymax=rate_Width+se.rate_Width),width = 0.15) +
+  facet_wrap(~replicate) + panel_border() +
+  labs(x = "Larval Stage", y=expression(paste("Width Growth Rate (", mu,"m",h^-1,")"))) 
+
+rate_vol <- reps_rates %>%
+  ggplot(.) +
+  aes(x = stage, y = rate.Volume.lm, color = replicate) +
+  #geom_boxplot(aes(group = stage), outlier.size = 0, width = 0.5) +
+  geom_point(size = 2, alpha = 0.8) + guides(color = F) +
+  theme_cowplot(font_size = 16, rel_small = 12/16) +
+  geom_errorbar(aes(x=stage,ymin=rate.Volume.lm-se.rate_Volume,ymax=rate.Volume.lm+se.rate_Volume),width = 0.15) +
+  facet_wrap(~replicate) + panel_border() +
+  labs(x = "Larval Stage", y=expression(paste("Volume (linear) Growth Rate (", mu, m^3, h^-1,")"))) 
+
+rate_logvol <- reps_rates %>%
+  ggplot(.) +
+  aes(x = stage, y = rate_logVolume, color = replicate) +
+  geom_boxplot(aes(group = stage), outlier.size = 0, width = 0.5) +
+  geom_point(size = 2, alpha = 0.8) + guides(color = F) +
+  theme_cowplot(font_size = 16, rel_small = 12/16) +
+  geom_errorbar(aes(x=stage,ymin=rate_logVolume-se.rate_logVolume,ymax=rate_logVolume+se.rate_logVolume),width = 0.15) +
+  facet_wrap(~replicate) + panel_border() +
+  labs(x = "Larval Stage", y=expression(paste("Volume (exp) Growth Rate (", mu, m^3, h^-1,")"))) 
+
+plot_grid(rate_len, rate_wid, nrow = 1, ncol = 2, align = "hv", axis = "tblr")
+plot_grid(rate_vol, rate_logvol, nrow = 1, ncol = 2, align = "hv", axis = "tblr")
+
+``` 
+ 
+ 
+ Wilcox.test: 
+  
+ ns: p > 0.05
+ + *: p <= 0.05
+ + **: p <= 0.01
+ 
+```{r eval=FALSE, fig.height=5, fig.width=10, message=FALSE, warning=FALSE, include=FALSE}
+
+# 6. Growth rates comparisons
+my_comparisons <- list(c("L1","L2"), c("L2","L3"), c("L3","L4"), c("L4","Adult"), 
+                       c("L1","L3"), c("L1","L4"), c("L1","Adult"), 
+                       c("L2","L4"), c("L2","Adult"), c("L3","Adult"))
+
+rate_len <- reps_rates %>%
+  ggplot(.) +
+  aes(x = stage, y = lm.rate_Length, color = replicate) +
+  geom_boxplot(aes(group = stage), outlier.shape = NA, width = 0.5) +
+  geom_jitter(size = 2, alpha = 0.8, width = 0.15) + 
+  theme_cowplot(font_size = 16, rel_small = 12/16) + theme(legend.position = "top") +
+  labs(x = "Larval Stage", y=expression(paste("Length Growth Rate (", mu,"m",h^-1,")"))) +
+  ggpubr::stat_compare_means(comparisons = my_comparisons, method = "wilcox.test", label = "p.signif", hide.ns = F)
+
+rate_wid <- reps_rates %>%
+  ggplot(.) +
+  aes(x = stage, y = lm.rate_Width, color = replicate) +
+  geom_boxplot(aes(group = stage), outlier.shape = NA, width = 0.5) +
+  geom_jitter(size = 2, alpha = 0.8, width = 0.15) + guides(color = F) +
+  theme_cowplot(font_size = 16, rel_small = 12/16) +
+  labs(x = "Larval Stage", y=expression(paste("Width Growth Rate (", mu,"m",h^-1,")"))) +
+  ggpubr::stat_compare_means(comparisons = my_comparisons, method = "wilcox.test", label = "p.format", show.legend = T)
+
+rate_vol <- reps_rates %>%
+  ggplot(.) +
+  aes(x = stage, y = rate.Volume.lm, color = replicate) +
+  geom_boxplot(aes(group = stage), outlier.shape = NA, width = 0.5) +
+  geom_jitter(size = 2, alpha = 0.8, width = 0.15) + guides(color = F) +
+  theme_cowplot(font_size = 16, rel_small = 12/16) +
+  labs(x = "Larval Stage", y=expression(paste("Volume (linear) Growth Rate (", mu, m^3, h^-1,")"))) +
+  ggpubr::stat_compare_means(comparisons = my_comparisons, method = "kruskal.test", label = "p.format", show.legend = T)
+
+rate_logvol <- reps_rates %>%
+  ggplot(.) +
+  aes(x = stage, y = rate_logVolume, color = replicate) +
+  geom_boxplot(aes(group = stage), outlier.shape = NA, width = 0.5) +
+  geom_jitter(size = 2, alpha = 0.8, width = 0.15) + guides(color = F) +
+  theme_cowplot(font_size = 16, rel_small = 12/16) +
+  labs(x = "Larval Stage", y=expression(paste("Volume (exp) Growth Rate (", mu, m^3, h^-1,")"))) +
+  ggpubr::stat_compare_means(comparisons = my_comparisons, method = "kruskal.test", label = "p.signif", show.legend = T)
+
+plot_grid(rate_len, rate_wid, nrow = 1, ncol = 2, align = "hv", axis = "tblr")
+plot_grid(rate_vol, rate_logvol, nrow = 1, ncol = 2, align = "hv", axis = "tblr")
+
+```
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
