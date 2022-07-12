@@ -158,7 +158,7 @@ For each detected QTL, we can observe the phenotypes of the strains with the ref
 
 ```{r, eval=whether_plot_pxg}
 nested.pxg.dat <- processed_mapping %>%
-    dplyr::filter(algorithm == "INBRED") %>%
+    #dplyr::filter(algorithm == "INBRED") %>%
     dplyr::filter(!is.na(peak_id)) %>%
     dplyr::select(CHROM, marker, trait, startPOS, peakPOS, endPOS, AF1, value, strain, allele, peak_id) %>%
     dplyr::distinct() %>%
