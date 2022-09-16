@@ -8,7 +8,7 @@ library(ggbeeswarm)
 ######################
 
 # load data for manhattan plot --> ie. marker information
-processed_mapping <- read.delim("processed_Cry5B_inbred.tsv", stringsAsFactors=FALSE) %>%
+processed_mapping <- read.delim("data/processed_Cry5B_inbred.tsv", stringsAsFactors=FALSE) %>%
   dplyr::mutate(CHROM = factor(CHROM, levels = c("I","II","III","IV","V","X","MtDNA"))) %>%
   dplyr::select(-marker) %>%
   tidyr::unite("marker", CHROM, POS, sep = ":", remove = F) %>%
@@ -17,7 +17,7 @@ processed_mapping <- read.delim("processed_Cry5B_inbred.tsv", stringsAsFactors=F
   dplyr::distinct()
 
 # load strain data for each marker 
-genotype_matrix <- read.delim("Genotype_Matrix.tsv", stringsAsFactors=FALSE) %>%
+genotype_matrix <- read.delim("data/Genotype_Matrix.tsv", stringsAsFactors=FALSE) %>%
   dplyr::mutate(CHROM = factor(CHROM, levels = c("I","II","III","IV","V","X","MtDNA"))) %>%
   tidyr::unite("marker", CHROM, POS, sep = ":", remove = F) %>%
   dplyr::mutate(POS = POS/1000000) %>%
@@ -30,7 +30,7 @@ genotype_matrix <- read.delim("Genotype_Matrix.tsv", stringsAsFactors=FALSE) %>%
                 allele = factor(allele, levels = c("REF", "ALT")))
 
 # load phenotype data for each strain
-phenotypes <- read.delim("phenotypes.tsv", stringsAsFactors=FALSE) %>% 
+phenotypes <- read.delim("data/phenotypes.tsv", stringsAsFactors=FALSE) %>% 
   dplyr::rename(value = Cry5B) %>%
   dplyr::left_join(genotype_matrix, ., by = "strain")
 
@@ -84,8 +84,13 @@ IV <- all_data %>%
 
 IVsub <- IV %>%
   dplyr::group_by(sig) %>%
-  dplyr::slice_sample(prop = 0.2) %>%
+  dplyr::slice_sample(prop = 0.3) %>%
   ungroup() 
+
+IVsub <- read_csv("sample_data.csv") %>%
+  dplyr::group_by(marker,CHROM,POS,A1,A2,AF1,BETA,SE,P,log10p,trait,BF,aboveBF,sig)%>%
+  nest() %>%
+  ungroup()
 
 # manhattan
 chrIV <- IVsub %>%
@@ -95,7 +100,7 @@ chrIV <- IVsub %>%
   geom_point(mapping = aes(x = POS, y = log10p, color = sig, alpha = sig)) +
   scale_alpha_manual(values = c("BF" = 1,  "user" = 1, "NONSIG" = 0.25)) +
   scale_colour_manual(values = sig.colors) + 
-  scale_x_continuous(expand = c(0, 0), breaks = c(5, 10, 15, 20)) +
+  scale_x_continuous(expand = c(0, 0), breaks = c(5, 10,15, 20)) +
   scale_y_continuous(limits = c(0,7.5)) +
   geom_hline(yintercept = 5.47, linetype = "dashed") + 
   scale_linetype_manual(values = c("BF" = 1)) +
@@ -108,8 +113,8 @@ chrIV <- IVsub %>%
   #shadow_trail(future = F, alpha = alpha*2, size = size/10, distance = 0.01) 
 
 animate(chrIV, nframes=nrow(IVsub), duration = 25, renderer = gifski_renderer(loop = F, width = 600, height = 400))
-animate(chrIV, nframes=nrow(IVsub), duration = 15, height = 4, width = 6, units = "in", res = 300)
-anim_save("ChrIV_man_20.gif")
+animate(chrIV, nframes=nrow(IVsub), duration = 20, height = 4, width = 6, units = "in", res = 300)
+anim_save("ChrIV_man.gif")
 
 
 # phenotype x genotype
@@ -132,8 +137,8 @@ chrIVpxg <- IVsub %>%
 
 
 animate(chrIVpxg, nframes=nrow(IVsub), duration = 25, renderer = gifski_renderer(loop = F, width = 300, height = 400))
-animate(chrIVpxg, nframes=nrow(IVsub), duration = 15, height = 4, width = 3, units = "in", res = 300)
-anim_save("ChrIV_pxg_20.gif")
+animate(chrIVpxg, nframes=nrow(IVsub), duration = 20, height = 4, width = 3, units = "in", res = 300)
+anim_save("ChrIV_pxg.gif")
 
 
 ## MISC
